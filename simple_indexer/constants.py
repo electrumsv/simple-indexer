@@ -1,0 +1,3 @@
+ZMQ_NODE_PORT = 28332
+ZMQ_TOPIC_HASH_BLOCK = "hashblock"
+ZMQ_TOPIC_HASH_TX = "hashtx"
