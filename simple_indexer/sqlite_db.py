@@ -139,6 +139,7 @@ class SQLiteDatabase:
     def create_tables(self):
         self.create_confirmed_tx_table()
         self.create_txos_table()
+        self.create_mempool_tx_table()
         self.create_inputs_table()
         self.create_pushdata_table()
 
@@ -163,13 +164,32 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS block_num ON confirmed_transactions (tx_hash);")
+        self.execute("CREATE INDEX IF NOT EXISTS tx_idx ON confirmed_transactions (tx_hash);")
 
     def drop_confirmed_tx_table(self):
         sql = (
             """DROP TABLE IF EXISTS confirmed_transactions"""
         )
         self.execute(sql)
+
+    def create_mempool_tx_table(self):
+        sql = (
+            """
+            CREATE TABLE IF NOT EXISTS mempool_transactions (
+                mp_tx_hash BINARY(32),
+                mp_tx_timestamp BINARY(32),
+                rawtx BLOB
+            )"""
+        )
+        self.execute(sql)
+        self.execute("CREATE INDEX IF NOT EXISTS mp_tx_idx ON mempool_transactions (mp_tx_hash);")
+
+    def drop_mempool_tx_table(self):
+        sql = (
+            """DROP TABLE IF EXISTS mempool_transactions"""
+        )
+        self.execute(sql)
+
 
     def create_txos_table(self):
         sql = (
@@ -240,6 +260,17 @@ class SQLiteDatabase:
                         rawtx
                    )
                    VALUES (?, ?, ?, ?)""")
+            self.execute(sql, tx_row)
+
+    def insert_mempool_tx_rows(self, tx_rows: List[tuple]) -> None:
+        # This is inefficient but it's not a priority
+        for tx_row in tx_rows:
+            sql = ("""INSERT INTO mempool_transactions (
+                        mp_tx_hash,
+                        mp_tx_timestamp,
+                        rawtx
+                   )
+                   VALUES (?, ?, ?)""")
             self.execute(sql, tx_row)
 
     def insert_txo_rows(self, txo_rows: List[tuple]) -> None:

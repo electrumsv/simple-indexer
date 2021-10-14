@@ -64,6 +64,17 @@ class BlockchainStateMonitor(threading.Thread):
 
         self.sqlite_db.insert_tx_rows(tx_rows)
 
+    def insert_mempool_tx_rows(self, txs: list[bitcoinx.Tx]):
+        tx_rows = []
+        for idx, tx in enumerate(txs):
+            mp_tx_hash = tx.hash()
+            mp_tx_timestamp = time.time()
+            rawtx = tx.to_bytes()
+            tx_row = (mp_tx_hash, mp_tx_timestamp, rawtx)
+            tx_rows.append(tx_row)
+
+        self.sqlite_db.insert_mempool_tx_rows(tx_rows)
+
     def insert_txo_rows(self, txs: list[bitcoinx.Tx]):
         output_rows = []
         for tx in txs:
@@ -136,8 +147,11 @@ class BlockchainStateMonitor(threading.Thread):
         rawblock_stream = io.BytesIO(rawblock)
         self.parse_block(hex_str_to_hash(block_hash), rawblock_stream)
 
-    def on_mempool_tx(self, tx_hash):
+    def on_mempool_tx(self, tx_hash: str):
         self.logger.debug(f"Got tx_hash: {tx_hash}")
+        rawtx = electrumsv_node.call_any('getrawtransaction', tx_hash, 0).json()['result']
+        tx = bitcoinx.Tx.from_hex(rawtx)
+        self.insert_mempool_tx_rows([tx])
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
