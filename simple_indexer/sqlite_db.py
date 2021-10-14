@@ -243,7 +243,16 @@ class SQLiteDatabase:
             self.execute(sql, tx_row)
 
     def insert_txo_rows(self, txo_rows: List[tuple]) -> None:
-        pass
+        # This is inefficient but it's not a priority
+        for output_row in txo_rows:
+            sql = ("""INSERT INTO txos (
+                        out_tx_hash,
+                        out_idx,
+                        out_value,
+                        out_scriptpubkey
+                   )
+                   VALUES (?, ?, ?, ?)""")
+            self.execute(sql, output_row)
 
     def insert_input_rows(self, input_rows: List[tuple]) -> None:
         # This is inefficient but it's not a priority
@@ -259,4 +268,13 @@ class SQLiteDatabase:
             self.execute(sql, input_row)
 
     def insert_pushdata_rows(self, pushdata_rows: List[tuple]) -> None:
-        pass
+        # This is inefficient but it's not a priority
+        for pushdata_row in pushdata_rows:
+            sql = ("""INSERT INTO pushdata (
+                        pushdata_hash,
+                        tx_hash,
+                        idx,
+                        ref_type
+                   )
+                   VALUES (?, ?, ?, ?)""")
+            self.execute(sql, pushdata_row)

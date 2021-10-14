@@ -11,6 +11,7 @@ from bitcoinx import hex_str_to_hash
 from electrumsv_node import electrumsv_node
 
 from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX
+from .parse_pushdata import get_pushdata_from_script
 from .utils import wait_for_initial_node_startup
 from .sqlite_db import SQLiteDatabase
 
@@ -63,6 +64,19 @@ class BlockchainStateMonitor(threading.Thread):
 
         self.sqlite_db.insert_tx_rows(tx_rows)
 
+    def insert_txo_rows(self, txs: list[bitcoinx.Tx]):
+        output_rows = []
+        for tx in txs:
+            for idx, output in enumerate(tx.outputs):
+                out_tx_hash = tx.hash()
+                out_idx = idx
+                out_value = output.value
+                out_scriptpubkey = output.script_pubkey.to_bytes()
+                output_row = (out_tx_hash, out_idx, out_value, out_scriptpubkey)
+                output_rows.append(output_row)
+
+        self.sqlite_db.insert_txo_rows(output_rows)
+
     def insert_input_rows(self, txs: list[bitcoinx.Tx]):
         input_rows = []
         for tx in txs:
@@ -71,12 +85,35 @@ class BlockchainStateMonitor(threading.Thread):
                 out_idx = input.prev_idx
                 in_tx_hash = tx.hash()
                 in_idx = idx
-                in_scriptsig = input.script_sig
-                input_row = (out_tx_hash, out_idx, in_tx_hash, in_idx, in_scriptsig.to_bytes())
+                in_scriptsig = input.script_sig.to_bytes()
+                input_row = (out_tx_hash, out_idx, in_tx_hash, in_idx, in_scriptsig)
                 input_rows.append(input_row)
 
         self.sqlite_db.insert_input_rows(input_rows)
 
+    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx]):
+        pushdata_rows = []
+        for tx in txs:
+            tx_hash = tx.hash()
+            for in_idx, input in enumerate(tx.inputs):
+                in_scriptsig = input.script_sig.to_bytes()
+                input_pushdatas = get_pushdata_from_script(in_scriptsig)
+                if input_pushdatas:
+                    for pushdata_hash in input_pushdatas:
+                        ref_type = 1  # An input
+                        pushdata_row = (pushdata_hash, tx_hash, in_idx, ref_type)
+                        pushdata_rows.append(pushdata_row)
+
+            for out_idx, output in enumerate(tx.outputs):
+                out_scriptpubkey = output.script_pubkey.to_bytes()
+                output_pushdatas = get_pushdata_from_script(out_scriptpubkey)
+                if output_pushdatas:
+                    for pushdata_hash in output_pushdatas:
+                        ref_type = 0  # An output
+                        pushdata_row = (pushdata_hash, tx_hash, out_idx, ref_type)
+                        pushdata_rows.append(pushdata_row)
+
+        self.sqlite_db.insert_pushdata_rows(pushdata_rows)
 
     def parse_block(self, block_hash: bytes, rawblock_stream: io.BytesIO):
         raw_header = rawblock_stream.read(80)  # Todo add a block headers table and insert this there
@@ -87,7 +124,9 @@ class BlockchainStateMonitor(threading.Thread):
             txs.append(tx)
 
         self.insert_tx_rows(block_hash, txs)
+        self.insert_txo_rows(txs)
         self.insert_input_rows(txs)
+        self.insert_pushdata_rows(txs)
 
 
     def on_block(self, block_hash: str) -> None:
