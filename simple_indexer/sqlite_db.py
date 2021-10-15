@@ -67,7 +67,7 @@ class SQLiteDatabase:
         self._connection_pool: queue.Queue[sqlite3.Connection] = queue.Queue()
         self._active_connections: Set[sqlite3.Connection] = set()
 
-        if int(os.getenv('SIMPLE_INDEX_RESET', "0")):
+        if int(os.getenv('SIMPLE_INDEX_RESET', "1")):
             self.reset_tables()
         else:  # create if not exist
             self.create_tables()
@@ -309,3 +309,34 @@ class SQLiteDatabase:
                    )
                    VALUES (?, ?, ?, ?)""")
             self.execute(sql, pushdata_row)
+
+    def create_temp_block_tx_hashes_table(self):
+        """Used to join on mempool"""
+        sql = (
+            """
+            CREATE TEMPORARY TABLE IF NOT EXISTS mined_tx_hashes (
+                tx_hash BINARY(32)
+            )"""
+        )
+        self.execute(sql)
+        self.execute("CREATE INDEX IF NOT EXISTS temp_table_tx_idx ON mined_tx_hashes (tx_hash);")
+
+    def drop_temp_block_hashes_table(self):
+        sql = ("""DROP TABLE IF EXISTS mined_tx_hashes""")
+        self.execute(sql)
+
+    def get_matching_mempool_txids(self, tx_hashes: set[bytes]) -> set[bytes]:
+        # Fill temporary table - one row at at time because we don't care about performance
+        self.create_temp_block_tx_hashes_table()
+        for tx_hash in tx_hashes:
+            sql = ("""INSERT INTO mined_tx_hashes (tx_hash) VALUES (?)""")
+            self.execute(sql, (tx_hash,))
+
+        # Run SELECT query to find txs that have already been processed
+        sql = ("""
+            SELECT mp_tx_hash 
+            FROM mempool_transactions 
+            JOIN mined_tx_hashes ON tx_hash = mp_tx_hash;""")
+        processed_tx_hashes = set(self.execute(sql))
+        self.drop_temp_block_hashes_table()
+        return processed_tx_hashes

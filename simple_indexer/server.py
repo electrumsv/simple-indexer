@@ -1,17 +1,27 @@
 from aiohttp import web
 import asyncio
+import mmap
+import os
+import sys
 import logging
 import queue
 import threading
 from typing import Dict, Optional
 
+from bitcoinx import (
+    CheckPoint,
+    BitcoinRegtest,
+    Headers,
+)
+
 from electrumsv_sdk.utils import get_directory_name
 
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
-from .blockchain_state_monitor import BlockchainStateMonitor
+from .synchronizer import Synchronizer
 from .sqlite_db import SQLiteDatabase
 from .utils import wait_for_initial_node_startup
+
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 49241
@@ -23,6 +33,17 @@ aiohttp_logger = logging.getLogger("aiohttp")
 aiohttp_logger.setLevel(logging.WARNING)
 
 
+NODE_HEADERS_MMAP_FILEPATH = 'node_headers.mmap'
+LOCAL_HEADERS_MMAP_FILEPATH = 'local_headers.mmap'
+MMAP_SIZE = 100_000  # headers count - should be ample for RegTest
+CHECKPOINT = CheckPoint(
+    bytes.fromhex(
+        "010000000000000000000000000000000000000000000000000000000000000000000000"
+        "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494d"
+        "ffff7f2002000000"), height=0, prev_work=0
+)
+
+
 class ApplicationState(object):
 
     def __init__(self, app: web.Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -30,18 +51,47 @@ class ApplicationState(object):
         self.app = app
         self.loop = loop
 
+        if int(os.getenv('SIMPLE_INDEX_RESET', "1")):
+            self.reset_headers_stores()
+
+        self.node_headers = Headers(BitcoinRegtest, NODE_HEADERS_MMAP_FILEPATH, CHECKPOINT)
+        self.local_headers = Headers(BitcoinRegtest, LOCAL_HEADERS_MMAP_FILEPATH, CHECKPOINT)
+
         self.ws_clients: Dict[str, WSClient] = {}
         self.ws_clients_lock: threading.RLock = threading.RLock()
 
         self.ws_queue: queue.Queue[str] = queue.Queue()  # json only
         self.commands_queue: queue.Queue[str] = queue.Queue()  # json only
-        self.blockchain_state_monitor_thread: Optional[BlockchainStateMonitor] = None
+        self.blockchain_state_monitor_thread: Optional[Synchronizer] = None
+
+    def reset_headers_stores(self):
+        if sys.platform == 'win32':
+            if os.path.exists(NODE_HEADERS_MMAP_FILEPATH):
+                with open(NODE_HEADERS_MMAP_FILEPATH, 'w+') as f:
+                    mm = mmap.mmap(f.fileno(), MMAP_SIZE)
+                    mm.seek(0)
+                    mm.write(b'\00' * mm.size())
+
+            # remove block headers - memory-mapped so need to do it this way to free memory immediately
+            if os.path.exists(LOCAL_HEADERS_MMAP_FILEPATH):
+                with open(LOCAL_HEADERS_MMAP_FILEPATH, 'w+') as f:
+                    mm = mmap.mmap(f.fileno(), MMAP_SIZE)
+                    mm.seek(0)
+                    mm.write(b'\00' * mm.size())
+        else:
+            try:
+                if os.path.exists(NODE_HEADERS_MMAP_FILEPATH):
+                    os.remove(NODE_HEADERS_MMAP_FILEPATH)
+                if os.path.exists(LOCAL_HEADERS_MMAP_FILEPATH):
+                    os.remove(LOCAL_HEADERS_MMAP_FILEPATH)
+            except FileNotFoundError:
+                pass
 
     def start_threads(self):
         threading.Thread(target=self.push_notifications_thread, daemon=True).start()
         threading.Thread(target=self.handle_websocket_messages_thread).start()
 
-        self.blockchain_state_monitor_thread = BlockchainStateMonitor(self, self.ws_queue)
+        self.blockchain_state_monitor_thread = Synchronizer(self, self.ws_queue)
         self.blockchain_state_monitor_thread.start()
 
     def get_ws_clients(self) -> Dict[str, WSClient]:
