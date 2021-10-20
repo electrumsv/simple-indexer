@@ -6,8 +6,11 @@ import logging
 import os
 import queue
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Set, List, Optional
+
+import bitcoinx
 
 
 class LeakedSQLiteConnectionError(Exception):
@@ -66,6 +69,7 @@ class SQLiteDatabase:
         self._db_path = str(storage_path)
         self._connection_pool: queue.Queue[sqlite3.Connection] = queue.Queue()
         self._active_connections: Set[sqlite3.Connection] = set()
+        self.mined_tx_hashes_table_lock = threading.RLock()
 
         if int(os.getenv('SIMPLE_INDEX_RESET', "1")):
             self.reset_tables()
@@ -148,6 +152,7 @@ class SQLiteDatabase:
         self.drop_txos_table()
         self.drop_inputs_table()
         self.drop_pushdata_table()
+        self.drop_mempool_tx_table()
 
     def reset_tables(self):
         self.drop_tables()
@@ -327,16 +332,26 @@ class SQLiteDatabase:
 
     def get_matching_mempool_txids(self, tx_hashes: set[bytes]) -> set[bytes]:
         # Fill temporary table - one row at at time because we don't care about performance
-        self.create_temp_block_tx_hashes_table()
-        for tx_hash in tx_hashes:
-            sql = ("""INSERT INTO mined_tx_hashes (tx_hash) VALUES (?)""")
-            self.execute(sql, (tx_hash,))
+        with self.mined_tx_hashes_table_lock:
+            self.create_temp_block_tx_hashes_table()
+            for tx_hash in tx_hashes:
+                sql = ("""INSERT INTO mined_tx_hashes (tx_hash) VALUES (?)""")
+                self.execute(sql, (tx_hash,))
 
-        # Run SELECT query to find txs that have already been processed
-        sql = ("""
-            SELECT mp_tx_hash 
-            FROM mempool_transactions 
-            JOIN mined_tx_hashes ON tx_hash = mp_tx_hash;""")
-        processed_tx_hashes = set(self.execute(sql))
-        self.drop_temp_block_hashes_table()
-        return processed_tx_hashes
+            # Run SELECT query to find txs that have already been processed
+            sql = ("""
+                SELECT mp_tx_hash 
+                FROM mempool_transactions 
+                JOIN mined_tx_hashes ON tx_hash = mp_tx_hash;""")
+
+            processed_tx_hashes = set()
+            for row in self.execute(sql):
+                tx_hash = row[0]
+            processed_tx_hashes.add(tx_hash)
+            self.drop_temp_block_hashes_table()
+            return processed_tx_hashes
+
+    def invalidate_mempool(self, tx_hashes: set[bytes]):
+        for tx_hash in tx_hashes:
+            sql = (f"""DELETE FROM mempool_transactions WHERE mp_tx_hash = ?""")
+            self.execute(sql, (tx_hash,))

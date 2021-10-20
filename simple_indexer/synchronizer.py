@@ -57,6 +57,7 @@ class Synchronizer(threading.Thread):
         self.app_state = app_state
         self.ws_queue = ws_queue
         self.sqlite_db = SQLiteDatabase()
+        self.is_ibd = False  # Set to True when initial block download is complete
 
         wait_for_initial_node_startup(self.logger)
         # NOTE: These are NOT daemon threads so must take care that all of them shutdown gracefully
@@ -156,7 +157,8 @@ class Synchronizer(threading.Thread):
 
         self.sqlite_db.insert_pushdata_rows(pushdata_rows)
 
-    def get_processed_vs_unprocessed_txs(self, txs):
+    def get_processed_vs_unprocessed_txs(self, txs: list[bitcoinx.Tx]) \
+            -> tuple[set[bytes], set[bytes]]:
         """Feed the tx hashes in the block to this SELECT query to see which have already been
         processed via the mempool"""
         tx_hashes = set(tx.hash() for tx in txs)
@@ -188,13 +190,17 @@ class Synchronizer(threading.Thread):
 
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
+        all_mined_tx_hashes = processed_tx_hashes | unprocessed_txs_hashes
+        self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in all_mined_tx_hashes]}")
+        self.sqlite_db.invalidate_mempool(all_mined_tx_hashes)
 
-    def on_block(self, block_hash: str) -> None:
-        self.logger.debug(f"Got blockhash: {block_hash}")
-        rawblock_hex = electrumsv_node.call_any('getblock', block_hash, 0).json()['result']
+    def on_block(self, new_tip: bitcoinx.Header) -> None:
+        block_hash_hex = hash_to_hex_str(new_tip.hash)
+        self.logger.debug(f"Got blockhash: {block_hash_hex}")
+        rawblock_hex = electrumsv_node.call_any('getblock', block_hash_hex, 0).json()['result']
         rawblock = bytes.fromhex(rawblock_hex)
         rawblock_stream = io.BytesIO(rawblock)
-        self.parse_block(hex_str_to_hash(block_hash), rawblock_stream)
+        self.parse_block(new_tip.hash, rawblock_stream)
 
     def on_tx(self, tx_hash: str):
         rawtx = electrumsv_node.call_any('getrawtransaction', tx_hash, 1).json()['result']
@@ -247,6 +253,16 @@ class Synchronizer(threading.Thread):
             block_header: str = electrumsv_node.call_any('getblockheader', block_hash, False).json()['result']
             self.connect_header(height, bytes.fromhex(block_header), headers_store='node')
 
+    def on_new_tip(self, block_hash_new_tip: str):
+        """This should only be called after initial block download"""
+        stored_node_tip = self.app_state.node_headers.longest_chain().tip
+        block_header_new_tip: str = electrumsv_node.call_any('getblockheader', block_hash_new_tip, False).json()['result']
+        self.connect_header(stored_node_tip.height+1, bytes.fromhex(block_header_new_tip), headers_store='node')
+        self.connect_header(stored_node_tip.height+1, bytes.fromhex(block_header_new_tip), headers_store='local')
+
+        tip: bitcoinx.Header = self.app_state.node_headers.longest_chain().tip
+        self.on_block(tip)
+
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
     # To me this is cleaner than a daemon=True thread where the thread dies in an uncontrolled way
@@ -259,11 +275,16 @@ class Synchronizer(threading.Thread):
 
         while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
             local_tip_height = self.app_state.local_headers.longest_chain().tip.height
-            header: bitcoinx.Header = self.app_state.node_headers.header_at_height(self.app_state.node_headers.longest_chain(), local_tip_height+1)
-            self.on_block(hash_to_hex_str(header.hash))
-            self.connect_header(local_tip_height+1, header.raw, headers_store='local')
+            new_header: bitcoinx.Header = self.app_state.node_headers.header_at_height(self.app_state.node_headers.longest_chain(), local_tip_height+1)
+            self.on_block(new_header)
+            self.connect_header(local_tip_height+1, new_header.raw, headers_store='local')
 
         self.logger.debug(f"Initial block download complete. Waiting for the next block...")
+        self.is_ibd = True
+        self.logger.debug(f"Requesting mempool...")
+        mempool_tx_hashes = electrumsv_node.call_any('getrawmempool').json()['result']
+        for tx_hash in mempool_tx_hashes:
+            self.on_tx(tx_hash)
 
         # Wait on zmq pub/sub socket for new tip
         context: zmq.Context = zmq.Context()
@@ -281,9 +302,11 @@ class Synchronizer(threading.Thread):
                     if msg == ZMQ_TOPIC_HASH_BLOCK:
                         continue
                     if len(msg) == 32:
+
+
                         block_hash = msg.hex()
-                        # logger.debug(f"Got {block_hash} from 'hashblock' sub")
-                        self.on_block(block_hash)
+                        logger.debug(f"Got {block_hash} from 'hashblock' sub")
+                        self.on_new_tip(block_hash)
                 except zmq.error.Again:
                     continue
                 except Exception:
@@ -316,7 +339,8 @@ class Synchronizer(threading.Thread):
                     if len(msg) == 32:
                         tx_hash = msg.hex()
                         # logger.debug(f"Got {tx_hash} from 'hashtx' sub")
-                        self.on_tx(tx_hash)
+                        if self.is_ibd:
+                            self.on_tx(tx_hash)
                 except zmq.error.Again:
                     continue
                 except Exception:
