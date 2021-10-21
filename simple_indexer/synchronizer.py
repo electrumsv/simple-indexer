@@ -7,7 +7,7 @@ import typing
 
 import bitcoinx
 import zmq
-from bitcoinx import hex_str_to_hash, hash_to_hex_str
+from bitcoinx import hex_str_to_hash, hash_to_hex_str, double_sha256
 from electrumsv_node import electrumsv_node
 
 from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX, \
@@ -222,15 +222,13 @@ class Synchronizer(threading.Thread):
             if headers_store == 'node':
                 self.app_state.node_headers.connect(raw_header)
                 self.app_state.node_headers.flush()
-                node_tip: bitcoinx.Header = self.app_state.node_headers.longest_chain().tip
-                self.logger.debug(f"Connected header (node store) tip height: {node_tip.height}; "
-                                  f"hash: {hash_to_hex_str(node_tip.hash)}")
+                self.logger.debug(f"Connected header (node store) height: {height}; "
+                                  f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
             else:
                 self.app_state.local_headers.connect(raw_header)
                 self.app_state.local_headers.flush()
-                local_tip: bitcoinx.Header = self.app_state.local_headers.longest_chain().tip
-                self.logger.debug(f"Connected header (local store) tip height: {local_tip.height}; "
-                                  f"hash: {hash_to_hex_str(local_tip.hash)}")
+                self.logger.debug(f"Connected header (local store) tip height: {height}; "
+                                  f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
 
         except bitcoinx.MissingHeader as e:
             if str(e).find(GENESIS_HASH) != -1 or str(e).find(NULL_HASH) != -1:
@@ -243,25 +241,72 @@ class Synchronizer(threading.Thread):
                     self.app_state.local_headers.flush()
                     self.logger.debug("Got genesis block or null hash")
             else:
-                self.logger.exception(e)
+                # self.logger.exception(e)
                 raise
 
-    def sync_node_block_headers(self, node_tip_height: int):
-        stored_node_tip = self.app_state.node_headers.longest_chain().tip.height
-        for height in range(stored_node_tip, node_tip_height + 1):
+    def sync_node_block_headers(self, to_height: int, from_height: int=0,
+            headers_store: str='node'):
+        if from_height != 0:
+            from_height = self.app_state.node_headers.longest_chain().tip.height
+        for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
             block_header: str = electrumsv_node.call_any('getblockheader', block_hash, False).json()['result']
-            self.connect_header(height, bytes.fromhex(block_header), headers_store='node')
+            self.connect_header(height, bytes.fromhex(block_header), headers_store=headers_store)
+
+    def backfill_headers(self, to_height: int):
+        # Just start at genesis and resync all headers (we do not care about performance)
+        self.sync_node_block_headers(to_height, from_height=0)
+
+    def find_common_parent(self, reorg_node_tip: bitcoinx.Header,
+            orphaned_tip: bitcoinx.Header) -> tuple[bitcoinx.Chain, int]:
+        chains: list[bitcoinx.Chain] = self.app_state.node_headers.chains()
+
+        # Get orphan an reorg chains
+        orphaned_chain = None
+        reorg_chain = None
+        for chain in chains:
+            if chain.tip.hash == reorg_node_tip.hash:
+                reorg_chain = chain
+            if chain.tip.hash == orphaned_tip.hash:
+                orphaned_chain = chain
+
+        if reorg_chain is not None and orphaned_chain is not None:
+            common_chain_and_height = reorg_chain.common_chain_and_height(orphaned_chain)
+            return common_chain_and_height
+        else:
+            # Should never happen
+            raise ValueError("No common parent block header could be found")
+
+    def on_reorg(self, orphaned_tip: bitcoinx.Header):
+        # Track down any missing node headers and add them to the 'node_headers' store
+        count_chains_before = len(self.app_state.node_headers.chains())
+        self.backfill_headers(orphaned_tip.height + 1)
+        count_chains_after_backfill = len(self.app_state.node_headers.chains())
+        if count_chains_after_backfill > count_chains_before:
+            reorg_new_tip = self.app_state.node_headers.longest_chain().tip
+            chain, common_parent_height = self.find_common_parent(reorg_new_tip, orphaned_tip)
+
+            depth = reorg_new_tip.height - common_parent_height
+            self.logger.debug(f"Reorg detected of depth: {depth}. Syncing blocks from parent height: "
+                              f"{common_parent_height} to {reorg_new_tip.height}")
+
+            for height in range(common_parent_height, reorg_new_tip.height + 1):
+                block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
+                header: bitcoinx.Header = self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
+                self.on_block(header)
+                self.connect_header(height, header.raw, headers_store='local')
 
     def on_new_tip(self, block_hash_new_tip: str):
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
-        block_header_new_tip: str = electrumsv_node.call_any('getblockheader', block_hash_new_tip, False).json()['result']
-        self.connect_header(stored_node_tip.height+1, bytes.fromhex(block_header_new_tip), headers_store='node')
-        self.connect_header(stored_node_tip.height+1, bytes.fromhex(block_header_new_tip), headers_store='local')
-
-        tip: bitcoinx.Header = self.app_state.node_headers.longest_chain().tip
-        self.on_block(tip)
+        raw_header_new_tip: str = electrumsv_node.call_any('getblockheader', block_hash_new_tip, False).json()['result']
+        try:
+            self.connect_header(stored_node_tip.height+1, bytes.fromhex(raw_header_new_tip), headers_store='node')
+            tip: bitcoinx.Header = self.app_state.node_headers.longest_chain().tip
+            self.on_block(tip)
+            self.connect_header(stored_node_tip.height+1, bytes.fromhex(raw_header_new_tip), headers_store='local')
+        except bitcoinx.MissingHeader:
+            self.on_reorg(stored_node_tip)
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
