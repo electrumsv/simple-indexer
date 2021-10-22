@@ -25,16 +25,7 @@ def submit_block(block_bytes: bytes) -> None:
     result.raise_for_status()
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        print(f"{sys.argv[0]} <directory path>")
-        sys.exit(1)
-
-    output_dir_path = os.path.realpath(sys.argv[1])
-    if not os.path.exists(output_dir_path) or not os.path.isdir(output_dir_path):
-        print(f"Directory does not exist: {sys.argv[1]}")
-        sys.exit(1)
-
+def import_blocks(output_dir_path: str, to_height: int):
     headers_file_path = os.path.join(output_dir_path, "headers.txt")
     if not os.path.exists(headers_file_path):
         print(f"Directory does not look like a blockchain export: {sys.argv[1]}")
@@ -54,12 +45,35 @@ def main() -> None:
             header_hash_hexs.append(header_hash_hex)
             i += 1
 
-    for i, header_hash_hex in enumerate(header_hash_hexs):
-        print(f"Uploading block {i} {header_hash_hex[:6]}")
+    for height, header_hash_hex in enumerate(header_hash_hexs):
+        if to_height and height > to_height:
+            break
+        print(f"Uploading block {height} {header_hash_hex[:6]}")
         block_file_path = os.path.join(output_dir_path, header_hash_hex)
         with open(block_file_path, "rb") as bf:
             block_bytes = bf.read()
             submit_block(block_bytes)
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print(f"{sys.argv[0]} <directory path> [<to_height>]")
+        sys.exit(1)
+
+    output_dir_path = os.path.realpath(sys.argv[1])
+    if not os.path.exists(output_dir_path) or not os.path.isdir(output_dir_path):
+        print(f"Directory does not exist: {sys.argv[1]}")
+        sys.exit(1)
+
+    to_height = None
+    if len(sys.argv) == 3 and sys.argv[2]:
+        to_height = sys.argv[2]
+        if not to_height.isdigit():
+            print(f"to_height optional argument is not a number")
+            sys.exit(1)
+        to_height = int(to_height)
+
+    import_blocks(output_dir_path, to_height)
 
     sys.exit(0)
 

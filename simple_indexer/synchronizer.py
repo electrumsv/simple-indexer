@@ -178,15 +178,12 @@ class Synchronizer(threading.Thread):
 
         processed_tx_hashes, unprocessed_txs_hashes = self.get_processed_vs_unprocessed_txs(txs)
 
+        self.insert_tx_rows(block_hash, txs)
         for tx in txs:
-            if tx.hash() in processed_tx_hashes:
-                self.insert_tx_rows(block_hash, txs)
-
             if tx.hash() in unprocessed_txs_hashes:
-                self.insert_tx_rows(block_hash, txs)
-                self.insert_txo_rows(txs)
-                self.insert_input_rows(txs)
-                self.insert_pushdata_rows(txs)
+                self.insert_txo_rows([tx])
+                self.insert_input_rows([tx])
+                self.insert_pushdata_rows([tx])
 
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
@@ -201,6 +198,7 @@ class Synchronizer(threading.Thread):
         rawblock = bytes.fromhex(rawblock_hex)
         rawblock_stream = io.BytesIO(rawblock)
         self.parse_block(new_tip.hash, rawblock_stream)
+        self.sqlite_db.insert_block_row(new_tip.hash, new_tip.height, rawblock)
 
     def on_tx(self, tx_hash: str):
         rawtx = electrumsv_node.call_any('getrawtransaction', tx_hash, 1).json()['result']
@@ -286,7 +284,7 @@ class Synchronizer(threading.Thread):
             reorg_new_tip = self.app_state.node_headers.longest_chain().tip
             chain, common_parent_height = self.find_common_parent(reorg_new_tip, orphaned_tip)
 
-            depth = reorg_new_tip.height - common_parent_height
+            depth = reorg_new_tip.height - common_parent_height - 1
             self.logger.debug(f"Reorg detected of depth: {depth}. Syncing blocks from parent height: "
                               f"{common_parent_height} to {reorg_new_tip.height}")
 
@@ -295,6 +293,7 @@ class Synchronizer(threading.Thread):
                 header: bitcoinx.Header = self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
                 self.on_block(header)
                 self.connect_header(height, header.raw, headers_store='local')
+
 
     def on_new_tip(self, block_hash_new_tip: str):
         """This should only be called after initial block download"""
@@ -347,8 +346,6 @@ class Synchronizer(threading.Thread):
                     if msg == ZMQ_TOPIC_HASH_BLOCK:
                         continue
                     if len(msg) == 32:
-
-
                         block_hash = msg.hex()
                         logger.debug(f"Got {block_hash} from 'hashblock' sub")
                         self.on_new_tip(block_hash)

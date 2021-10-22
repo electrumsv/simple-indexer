@@ -132,8 +132,10 @@ class SQLiteDatabase:
             return cur.fetchall()
         except sqlite3.IntegrityError as e:
             if str(e).find('UNIQUE constraint failed') != -1:
-                self.logger.debug("caught constraint violation for attempting to insert the same "
-                    "block twice")
+                self.logger.debug(f"caught unique constraint violation "
+                                  f"- skipped redundant insertion")
+                # self.logger.debug(f"caught unique constraint violation: {sql} "
+                #                   f"- skipped redundant insertion")
         except Exception:
             connection.rollback()
             self.logger.exception(f"An unexpected exception occured for SQL: {sql}")
@@ -146,6 +148,7 @@ class SQLiteDatabase:
         self.create_mempool_tx_table()
         self.create_inputs_table()
         self.create_pushdata_table()
+        self.create_blocks_table()
 
     def drop_tables(self):
         self.drop_confirmed_tx_table()
@@ -153,10 +156,29 @@ class SQLiteDatabase:
         self.drop_inputs_table()
         self.drop_pushdata_table()
         self.drop_mempool_tx_table()
+        self.drop_raw_blocks_table()
 
     def reset_tables(self):
         self.drop_tables()
         self.create_tables()
+
+    def create_blocks_table(self):
+        sql = (
+            """
+            CREATE TABLE IF NOT EXISTS blocks (
+                block_hash BINARY(32),
+                block_height INTEGER,
+                raw_block BLOB
+            )"""
+        )
+        self.execute(sql)
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS block_hash_idx ON blocks (block_hash);")
+
+    def drop_raw_blocks_table(self):
+        sql = (
+            """DROP TABLE IF EXISTS blocks"""
+        )
+        self.execute(sql)
 
     def create_confirmed_tx_table(self):
         sql = (
@@ -169,7 +191,9 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS tx_idx ON confirmed_transactions (tx_hash);")
+        # NOTE: The UNIQUE constraint must cover both tx_hash + block_hash so that we can record
+        # the same tx on both sides of a fork
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS tx_idx ON confirmed_transactions (tx_hash, block_hash);")
 
     def drop_confirmed_tx_table(self):
         sql = (
@@ -187,7 +211,7 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS mp_tx_idx ON mempool_transactions (mp_tx_hash);")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS mp_tx_idx ON mempool_transactions (mp_tx_hash);")
 
     def drop_mempool_tx_table(self):
         sql = (
@@ -207,7 +231,7 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS txo_idx ON txos (out_tx_hash, out_idx);")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS txo_idx ON txos (out_tx_hash, out_idx);")
 
     def drop_txos_table(self):
         sql = (
@@ -227,7 +251,9 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS inputs_idx ON inputs (out_tx_hash, out_idx);")
+        # NOTE: For coinbases all have the same
+        # out_tx_hash == '0000000000000000000000000000000000000000000000000000000000000000'
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS inputs_idx ON inputs (out_tx_hash, out_idx, in_tx_hash, in_idx);")
 
     def drop_inputs_table(self):
         sql = (
@@ -246,7 +272,7 @@ class SQLiteDatabase:
             )"""
         )
         self.execute(sql)
-        self.execute("CREATE INDEX IF NOT EXISTS pushdata_idx ON pushdata (pushdata_hash, tx_hash, idx, ref_type);")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS pushdata_idx ON pushdata (pushdata_hash, tx_hash, idx, ref_type);")
 
     def drop_pushdata_table(self):
         sql = (
@@ -347,7 +373,7 @@ class SQLiteDatabase:
             processed_tx_hashes = set()
             for row in self.execute(sql):
                 tx_hash = row[0]
-            processed_tx_hashes.add(tx_hash)
+                processed_tx_hashes.add(tx_hash)
             self.drop_temp_block_hashes_table()
             return processed_tx_hashes
 
@@ -355,3 +381,7 @@ class SQLiteDatabase:
         for tx_hash in tx_hashes:
             sql = (f"""DELETE FROM mempool_transactions WHERE mp_tx_hash = ?""")
             self.execute(sql, (tx_hash,))
+
+    def insert_block_row(self, block_hash: bytes, height: int, raw_block: bytes):
+        sql = (f"""INSERT INTO blocks VALUES (?, ?, ?) """)
+        self.execute(sql, (block_hash, height, raw_block))
