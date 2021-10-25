@@ -56,7 +56,7 @@ class Synchronizer(threading.Thread):
         self.logger = logging.getLogger("blockchain-state-monitor")
         self.app_state = app_state
         self.ws_queue = ws_queue
-        self.sqlite_db = SQLiteDatabase()
+        self.sqlite_db = self.app_state.sqlite_db
         self.is_ibd = False  # Set to True when initial block download is complete
 
         wait_for_initial_node_startup(self.logger)
