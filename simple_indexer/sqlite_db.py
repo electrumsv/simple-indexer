@@ -8,9 +8,12 @@ import queue
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Set, List, Optional
+from typing import Set, List, Optional, Generator, Dict
 
 import bitcoinx
+from bitcoinx import hash_to_hex_str
+
+from simple_indexer.types import RestorationFilterRequest, RestorationFilterResponse
 
 
 class LeakedSQLiteConnectionError(Exception):
@@ -385,3 +388,33 @@ class SQLiteDatabase:
     def insert_block_row(self, block_hash: bytes, height: int, raw_block: bytes):
         sql = (f"""INSERT INTO blocks VALUES (?, ?, ?) """)
         self.execute(sql, (block_hash, height, raw_block))
+
+    # Todo - make this a generator
+    def get_pushdata_filter_matches(self, pushdata_hashes: RestorationFilterRequest) \
+            -> Generator[RestorationFilterResponse, None, None]:
+        sql = f"""SELECT PD.pushdata_hash, PD.tx_hash, PD.idx, PD.ref_type, IT.in_tx_hash, IT.in_idx 
+                    FROM pushdata PD
+                    LEFT JOIN inputs IT 
+                    ON PD.tx_hash=IT.out_tx_hash 
+                    AND PD.idx=IT.out_idx 
+                    AND PD.ref_type=0
+                    WHERE PD.pushdata_hash IN ({",".join([f"X'{x}'" for x in pushdata_hashes])})"""
+
+        result = self.execute(sql)
+        for row in result:
+            pushdata_hash = hash_to_hex_str(row[0])
+            tx_hash = hash_to_hex_str(row[1])
+            idx = row[2]
+            ref_type = row[3]
+            in_tx_hash = None
+            if row[4]:
+                in_tx_hash = hash_to_hex_str(row[4])
+            in_idx = row[5]
+            yield {
+                "PushDataHashHex": pushdata_hash,
+                "TransactionId": tx_hash,
+                "Index": idx,
+                "ReferenceType": ref_type,
+                "SpendTransactionId": in_tx_hash,
+                "SpendInputIndex": in_idx
+            }

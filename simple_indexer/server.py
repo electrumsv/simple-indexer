@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from aiohttp import web
 import asyncio
 import mmap
@@ -27,6 +29,7 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 49241
 
 COMPONENT_NAME = get_directory_name(__file__)
+MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
 # Silence verbose logging
 aiohttp_logger = logging.getLogger("aiohttp")
@@ -63,6 +66,7 @@ class ApplicationState(object):
         self.ws_queue: queue.Queue[str] = queue.Queue()  # json only
         self.commands_queue: queue.Queue[str] = queue.Queue()  # json only
         self.blockchain_state_monitor_thread: Optional[Synchronizer] = None
+        self.sqlite_db = SQLiteDatabase(MODULE_DIR.parent / 'simple_index.db')
 
     def reset_headers_stores(self):
         if sys.platform == 'win32':
@@ -133,7 +137,6 @@ class ApplicationState(object):
 
         try:
             wait_for_initial_node_startup(self.logger)
-            sqlite_db = SQLiteDatabase()
             while self.app.is_alive:
                 try:
                     json_msg = self.commands_queue.get(timeout=0.5)
@@ -158,6 +161,7 @@ def get_aiohttp_app() -> web.Application:
     app.add_routes([
         web.get("/", handlers.ping),
         web.get("/error", handlers.error),
+        web.get("/get_pushdata_filter_matches", handlers.get_pushdata_filter_matches),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
 
