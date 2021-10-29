@@ -275,10 +275,10 @@ class Synchronizer(threading.Thread):
             # Should never happen
             raise ValueError("No common parent block header could be found")
 
-    def on_reorg(self, orphaned_tip: bitcoinx.Header):
+    def on_reorg(self, orphaned_tip: bitcoinx.Header, new_best_tip: int):
         # Track down any missing node headers and add them to the 'node_headers' store
         count_chains_before = len(self.app_state.node_headers.chains())
-        self.backfill_headers(orphaned_tip.height + 1)
+        self.backfill_headers(new_best_tip)
         count_chains_after_backfill = len(self.app_state.node_headers.chains())
         if count_chains_after_backfill > count_chains_before:
             reorg_new_tip = self.app_state.node_headers.longest_chain().tip
@@ -288,24 +288,32 @@ class Synchronizer(threading.Thread):
             self.logger.debug(f"Reorg detected of depth: {depth}. Syncing blocks from parent height: "
                               f"{common_parent_height} to {reorg_new_tip.height}")
 
-            for height in range(common_parent_height, reorg_new_tip.height + 1):
+            for height in range(common_parent_height, new_best_tip + 1):
                 block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
                 header: bitcoinx.Header = self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
                 self.on_block(header)
                 self.connect_header(height, header.raw, headers_store='local')
 
+    def sync_blocks(self, from_height=0, to_height=0):
+        for height in range(from_height, to_height + 1):
+            block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
+            header: bitcoinx.Header = \
+            self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
+            self.on_block(header)
+            self.connect_header(height, header.raw, headers_store='local')
 
     def on_new_tip(self, block_hash_new_tip: str):
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
-        raw_header_new_tip: str = electrumsv_node.call_any('getblockheader', block_hash_new_tip, False).json()['result']
+        new_best_tip: dict = electrumsv_node.call_any('getblockheader', block_hash_new_tip, True).json()['result']
+        self.logger.debug(f"New best tip height: {new_best_tip['height']}. "
+                          f"Stored node height: {stored_node_tip.height}")
+
         try:
-            self.connect_header(stored_node_tip.height+1, bytes.fromhex(raw_header_new_tip), headers_store='node')
-            tip: bitcoinx.Header = self.app_state.node_headers.longest_chain().tip
-            self.on_block(tip)
-            self.connect_header(stored_node_tip.height+1, bytes.fromhex(raw_header_new_tip), headers_store='local')
+            self.sync_node_block_headers(to_height=new_best_tip['height'], from_height=stored_node_tip.height)
+            self.sync_blocks(from_height=stored_node_tip.height, to_height=new_best_tip['height'])
         except bitcoinx.MissingHeader:
-            self.on_reorg(stored_node_tip)
+            self.on_reorg(stored_node_tip, new_best_tip['height'])
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
