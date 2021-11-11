@@ -135,8 +135,9 @@ class SQLiteDatabase:
             return cur.fetchall()
         except sqlite3.IntegrityError as e:
             if str(e).find('UNIQUE constraint failed') != -1:
-                self.logger.debug(f"caught unique constraint violation "
-                                  f"- skipped redundant insertion")
+                pass
+                # self.logger.debug(f"caught unique constraint violation "
+                #                   f"- skipped redundant insertion")
                 # self.logger.debug(f"caught unique constraint violation: {sql} "
                 #                   f"- skipped redundant insertion")
         except Exception:

@@ -19,6 +19,8 @@ from .sqlite_db import SQLiteDatabase
 if typing.TYPE_CHECKING:
     from .server import ApplicationState
 
+from typing import Optional
+
 
 class Synchronizer(threading.Thread):
     """
@@ -244,8 +246,7 @@ class Synchronizer(threading.Thread):
 
     def sync_node_block_headers(self, to_height: int, from_height: int=0,
             headers_store: str='node'):
-        if from_height != 0:
-            from_height = self.app_state.node_headers.longest_chain().tip.height
+
         for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
             block_header: str = electrumsv_node.call_any('getblockheader', block_hash, False).json()['result']
@@ -310,8 +311,9 @@ class Synchronizer(threading.Thread):
                           f"Stored node height: {stored_node_tip.height}")
 
         try:
-            self.sync_node_block_headers(to_height=new_best_tip['height'], from_height=stored_node_tip.height)
-            self.sync_blocks(from_height=stored_node_tip.height, to_height=new_best_tip['height'])
+            self.sync_node_block_headers(to_height=new_best_tip['height'],
+                from_height=new_best_tip['height'])
+            self.sync_blocks(from_height=new_best_tip['height'], to_height=new_best_tip['height'])
         except bitcoinx.MissingHeader:
             self.on_reorg(stored_node_tip, new_best_tip['height'])
 
@@ -323,7 +325,8 @@ class Synchronizer(threading.Thread):
 
         result = electrumsv_node.call_any('getblockchaininfo').json()['result']
         node_tip_height = result['headers']
-        self.sync_node_block_headers(node_tip_height)
+
+        self.sync_node_block_headers(node_tip_height, from_height=0)
 
         while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
             local_tip_height = self.app_state.local_headers.longest_chain().tip.height
