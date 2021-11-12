@@ -163,6 +163,7 @@ def get_aiohttp_app() -> web.Application:
         web.get("/error", handlers.error),
         web.get("/get_pushdata_filter_matches.json", handlers.get_pushdata_filter_matches_json),
         web.get("/get_pushdata_filter_matches.bin", handlers.get_pushdata_filter_matches_binary),
+        web.get("/get_transaction/{txid}", handlers.get_transaction),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
 

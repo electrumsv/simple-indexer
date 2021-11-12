@@ -6,8 +6,10 @@ import aiohttp
 from aiohttp import web
 import logging
 
-from simple_indexer.types import RestorationFilterRequest, RESULT_UNPACK_FORMAT, \
-    filter_response_struct, FILTER_RESPONSE_SIZE
+from bitcoinx import hex_str_to_hash
+
+from simple_indexer.types import RestorationFilterRequest, filter_response_struct, \
+    FILTER_RESPONSE_SIZE
 
 if typing.TYPE_CHECKING:
     from simple_indexer.server import ApplicationState
@@ -79,3 +81,23 @@ async def get_pushdata_filter_matches_binary(request: web.Request):
     logger.debug(f"Total pushdata filter match response size: {total_size} for count: {count}")
     await response.write_eof()
     return response
+
+
+async def get_transaction(request: web.Request) -> web.Response:
+    app_state: 'ApplicationState' = request.app['app_state']
+    sqlite_db: SQLiteDatabase = app_state.sqlite_db
+    accept_type = request.headers.get('Accept')
+
+    try:
+        txid = request.match_info['txid']
+        if not txid:
+            raise ValueError('no txid submitted')
+
+        rawtx = sqlite_db.get_transaction(hex_str_to_hash(txid))
+    except ValueError:
+        return web.Response(status=400)
+
+    if accept_type == 'application/octet-stream':
+        return web.Response(body=rawtx)
+    else:
+        return web.json_response(data=rawtx.hex())
