@@ -1,3 +1,4 @@
 bitcoinx
 requests>=2.21.0
 zmq
+electrumsv_sdk
