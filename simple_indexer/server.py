@@ -163,6 +163,7 @@ def get_aiohttp_app() -> web.Application:
         web.get("/error", handlers.error),
         web.get("/get_pushdata_filter_matches", handlers.get_pushdata_filter_matches),
         web.get("/get_transaction/{txid}", handlers.get_transaction),
+        web.get("/get_merkle_proof/{txid}", handlers.get_merkle_proof),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
 
