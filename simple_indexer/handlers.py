@@ -64,7 +64,8 @@ async def get_pushdata_filter_matches(request: web.Request):
             row = (json.dumps(match) + "\n").encode('utf-8')
             await response.write(row)
 
-    await response.write_eof()
+        finalization_flag = b'\x00'
+        await response.write(finalization_flag)
     return response
 
 
