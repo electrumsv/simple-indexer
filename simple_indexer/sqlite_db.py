@@ -370,6 +370,14 @@ class SQLiteDatabase:
         rawtx = result[0][0]
         return rawtx
 
+    def get_block_hash_for_tx(self, tx_hash: bytes) -> Optional[bytes]:
+        sql = f"""SELECT block_hash FROM confirmed_transactions WHERE tx_hash = ?"""
+        result = self.execute(sql, params=(tx_hash,))
+        if len(result) == 0:
+            return
+        block_hash = result[0][0]
+        return block_hash
+
     def get_matching_mempool_txids(self, tx_hashes: set[bytes]) -> set[bytes]:
         # Fill temporary table - one row at at time because we don't care about performance
         with self.mined_tx_hashes_table_lock:

@@ -3,13 +3,15 @@ import struct
 import typing
 
 import aiohttp
+import requests
 from aiohttp import web
 import logging
 
-from bitcoinx import hex_str_to_hash
+from bitcoinx import hex_str_to_hash, hash_to_hex_str
+from electrumsv_node import electrumsv_node
 
 from simple_indexer.types import RestorationFilterRequest, filter_response_struct, \
-    FILTER_RESPONSE_SIZE
+    FILTER_RESPONSE_SIZE, tsc_merkle_proof_json_to_binary
 
 if typing.TYPE_CHECKING:
     from simple_indexer.server import ApplicationState
@@ -80,6 +82,8 @@ async def get_transaction(request: web.Request) -> web.Response:
             raise ValueError('no txid submitted')
 
         rawtx = sqlite_db.get_transaction(hex_str_to_hash(txid))
+        if not rawtx:
+            return web.Response(status=404)
     except ValueError:
         return web.Response(status=400)
 
@@ -87,3 +91,88 @@ async def get_transaction(request: web.Request) -> web.Response:
         return web.Response(body=rawtx)
     else:
         return web.json_response(data=rawtx.hex())
+
+
+async def get_merkle_proof(request: web.Request) -> web.Response:
+    # Todo - use the bitcoin node as much as possible (this is only for RegTest)
+    app_state: 'ApplicationState' = request.app['app_state']
+    sqlite_db: SQLiteDatabase = app_state.sqlite_db
+    accept_type = request.headers.get('Accept')
+
+    # Get block_hash
+    try:
+        txid = request.match_info['txid']
+        if not txid:
+            raise ValueError('no txid submitted')
+
+        block_hash = sqlite_db.get_block_hash_for_tx(hex_str_to_hash(txid))
+        if not block_hash:
+            return web.Response(status=404)
+    except ValueError:
+        return web.Response(status=400)
+
+    include_full_tx = False
+    target_type = 'hash'
+    body = await request.content.read()
+    if body:
+        json_body = json.loads(body.decode('utf-8'))
+        include_full_tx = json_body.get('includeFullTx')
+        target_type = json_body.get('targetType')
+        if include_full_tx is not None and include_full_tx not in {True, False}:
+            return web.Response(status=400)
+
+        if target_type is not None and target_type not in {'hash', 'header', 'merkleroot'}:
+            return web.Response(status=400)
+
+    # Request TSC merkle proof from the node
+    # Todo - binary format not currently supported by the node
+    try:
+        tsc_merkle_proof = electrumsv_node.call_any("getmerkleproof2",
+            hash_to_hex_str(block_hash), txid, include_full_tx, target_type).json()['result']
+
+        if accept_type == 'application/octet-stream':
+            binary_response = tsc_merkle_proof_json_to_binary(tsc_merkle_proof,
+                include_full_tx=include_full_tx,
+                target_type=target_type)
+            return web.Response(body=binary_response)
+        else:
+            return web.json_response(data=tsc_merkle_proof)
+    except requests.exceptions.HTTPError as e:
+        # the node does not return merkle proofs when there is only a single coinbase tx
+        # in the block. It could be argued that this is a bug and it should return the same format.
+        result = electrumsv_node.call_any("getrawtransaction", txid, 1).json()['result']
+        rawtx = result['hex']
+        blockhash = result['blockhash']
+        result = electrumsv_node.call_any("getblock", blockhash).json()['result']
+        num_tx = result['num_tx']
+        if num_tx != 1:
+            return web.Response(status=404)
+        else:
+            merkleroot = result['merkleroot']
+            assert merkleroot == txid
+
+            txOrId = txid
+            if include_full_tx:
+                txOrId = rawtx
+
+            if target_type == 'hash':
+                target = blockhash
+            elif target_type == 'header':
+                target = electrumsv_node.call_any("getblockheader", blockhash, False).json()['result']
+            elif target_type == 'merkleroot':
+                target = merkleroot
+            else:
+                target = blockhash
+
+            tsc_merkle_proof = {
+                'index': 0,
+                'txOrId': txOrId,
+                'target': target,
+                'nodes': []
+            }
+            if accept_type == 'application/octet-stream':
+                binary_response = tsc_merkle_proof_json_to_binary(tsc_merkle_proof,
+                    include_full_tx=include_full_tx, target_type=target_type)
+                return web.Response(body=binary_response)
+            else:
+                return web.json_response(data=tsc_merkle_proof)
