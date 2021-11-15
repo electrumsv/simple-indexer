@@ -49,6 +49,11 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
                 "baseURL": "/api/v1/transaction",
             },
             {
+                "apiType": "bsvapi.merkle-proof",
+                "apiVersion": 1,
+                "baseURL": "/api/v1/merkle-proof",
+            },
+            {
                 "apiType": "bsvapi.restoration",
                 "apiVersion": 1,
                 "baseURL": "/api/v1/restoration",
