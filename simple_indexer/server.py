@@ -161,8 +161,7 @@ def get_aiohttp_app() -> web.Application:
     app.add_routes([
         web.get("/", handlers.ping),
         web.get("/error", handlers.error),
-        web.get("/get_pushdata_filter_matches.json", handlers.get_pushdata_filter_matches_json),
-        web.get("/get_pushdata_filter_matches.bin", handlers.get_pushdata_filter_matches_binary),
+        web.get("/get_pushdata_filter_matches", handlers.get_pushdata_filter_matches),
         web.get("/get_transaction/{txid}", handlers.get_transaction),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
