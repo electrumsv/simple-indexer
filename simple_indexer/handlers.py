@@ -1,6 +1,8 @@
+from datetime import datetime, timedelta
 import json
 import struct
 import typing
+from typing import Any, Dict
 
 import aiohttp
 import requests
@@ -10,12 +12,13 @@ import logging
 from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
-from simple_indexer.types import RestorationFilterRequest, filter_response_struct, \
+from .constants import SERVER_HOST, SERVER_PORT
+from .types import RestorationFilterRequest, filter_response_struct, \
     FILTER_RESPONSE_SIZE, tsc_merkle_proof_json_to_binary
 
 if typing.TYPE_CHECKING:
-    from simple_indexer.server import ApplicationState
-    from simple_indexer.sqlite_db import SQLiteDatabase
+    from .server import ApplicationState
+    from .sqlite_db import SQLiteDatabase
 
 
 logger = logging.getLogger('handlers')
@@ -27,6 +30,38 @@ async def ping(request: web.Request) -> web.Response:
 
 async def error(request: web.Request) -> web.Response:
     raise ValueError("This is a test of raising an exception in the handler")
+
+
+async def get_endpoints_data(request: web.Request) -> web.Response:
+    utc_now_datetime = datetime.utcnow()
+    utc_expiry_datetime = utc_now_datetime + timedelta(days=1)
+
+    data: Dict[str, Any] = {
+        "apiType": "bsvapi.endpoints",
+        "apiVersion": 1,
+        "baseUrl": f"http://{SERVER_HOST}:{SERVER_PORT}",
+        "timestamp": utc_now_datetime.isoformat() +"Z",
+        "expiryTime": utc_expiry_datetime.isoformat() +"Z",
+        "endpoints": [
+            {
+                "apiType": "bsvapi.transaction",
+                "apiVersion": 1,
+                "baseURL": "/api/v1/transaction",
+            },
+            {
+                "apiType": "bsvapi.restoration",
+                "apiVersion": 1,
+                "baseURL": "/api/v1/restoration",
+                "pricing": {
+                    "data": {
+                        "satoshis": 4524,
+                        "bytes": 10000000,
+                    }
+                }
+            }
+        ]
+    }
+    return web.json_response(data=data)
 
 
 async def get_pushdata_filter_matches(request: web.Request):

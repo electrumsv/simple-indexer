@@ -23,7 +23,8 @@ if typing.TYPE_CHECKING:
     from .simple_indexer.server import ApplicationState
 
 
-from simple_indexer.server import get_aiohttp_app, SERVER_HOST, SERVER_PORT
+from simple_indexer.constants import SERVER_HOST, SERVER_PORT
+from simple_indexer.server import get_aiohttp_app
 
 
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))

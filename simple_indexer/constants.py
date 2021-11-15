@@ -9,3 +9,6 @@ MAX_UINT32 = 2**32 - 1
 # Converted to a 1 byte char flag for pushdata matches
 OUTPUT_MATCH = 1 << 0
 INPUT_MATCH = 1 << 1
+
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 49241

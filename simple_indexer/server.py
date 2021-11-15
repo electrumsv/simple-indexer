@@ -18,15 +18,13 @@ from bitcoinx import (
 
 from electrumsv_sdk.utils import get_directory_name
 
+from .constants import SERVER_HOST, SERVER_PORT
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
 from .synchronizer import Synchronizer
 from .sqlite_db import SQLiteDatabase
 from .utils import wait_for_initial_node_startup
 
-
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 49241
 
 COMPONENT_NAME = get_directory_name(__file__)
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -161,6 +159,7 @@ def get_aiohttp_app() -> web.Application:
     app.add_routes([
         web.get("/", handlers.ping),
         web.get("/error", handlers.error),
+        web.get("/api/v1/endpoints", handlers.get_endpoints_data),
         web.get("/api/v1/restoration/search", handlers.get_pushdata_filter_matches),
         web.get("/api/v1/transaction/{txid}", handlers.get_transaction),
         web.get("/api/v1/merkle-proof/{txid}", handlers.get_merkle_proof),
