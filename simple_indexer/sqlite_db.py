@@ -6,14 +6,16 @@ import logging
 import os
 import queue
 import sqlite3
+import struct
 import threading
 from pathlib import Path
-from typing import Set, List, Optional, Generator, Dict
+from typing import Set, List, Optional, Generator, Union
 
-import bitcoinx
-from bitcoinx import hash_to_hex_str
+from bitcoinx import hash_to_hex_str, hex_str_to_hash
 
-from simple_indexer.types import RestorationFilterRequest, RestorationFilterResponse
+from simple_indexer.constants import MAX_UINT32
+from simple_indexer.types import RestorationFilterRequest, RestorationFilterJSONResponse, \
+    RestorationFilterResult, le_int_to_char
 
 
 class LeakedSQLiteConnectionError(Exception):
@@ -360,6 +362,14 @@ class SQLiteDatabase:
         sql = ("""DROP TABLE IF EXISTS mined_tx_hashes""")
         self.execute(sql)
 
+    def get_transaction(self, tx_hash: bytes) -> Optional[bytes]:
+        sql = f"""SELECT rawtx FROM confirmed_transactions WHERE tx_hash = ?"""
+        result = self.execute(sql, params=(tx_hash,))
+        if len(result) == 0:
+            return
+        rawtx = result[0][0]
+        return rawtx
+
     def get_matching_mempool_txids(self, tx_hashes: set[bytes]) -> set[bytes]:
         # Fill temporary table - one row at at time because we don't care about performance
         with self.mined_tx_hashes_table_lock:
@@ -390,32 +400,63 @@ class SQLiteDatabase:
         sql = (f"""INSERT INTO blocks VALUES (?, ?, ?) """)
         self.execute(sql, (block_hash, height, raw_block))
 
+    def get_pushdata_match_flag(self, ref_type: int) -> int:
+        if ref_type == 0:
+            return 1 << 0
+        if ref_type == 1:
+            return 1 << 1
+
     # Todo - make this a generator
-    def get_pushdata_filter_matches(self, pushdata_hashes: RestorationFilterRequest) \
-            -> Generator[RestorationFilterResponse, None, None]:
-        sql = f"""SELECT PD.pushdata_hash, PD.tx_hash, PD.idx, PD.ref_type, IT.in_tx_hash, IT.in_idx 
+    def get_pushdata_filter_matches(self, pushdata_hashes: RestorationFilterRequest, json=True) \
+            -> Generator[Union[RestorationFilterJSONResponse, RestorationFilterResult], None, None]:
+        sql = f"""SELECT PD.pushdata_hash, PD.tx_hash, PD.idx, PD.ref_type, IT.in_tx_hash, IT.in_idx , B.block_height
                     FROM pushdata PD
-                    LEFT JOIN inputs IT 
-                    ON PD.tx_hash=IT.out_tx_hash 
-                    AND PD.idx=IT.out_idx 
-                    AND PD.ref_type=0
+                    LEFT JOIN inputs IT ON PD.tx_hash=IT.out_tx_hash AND PD.idx=IT.out_idx AND PD.ref_type=0
+                    INNER JOIN confirmed_transactions CT ON PD.tx_hash = CT.tx_hash
+                    INNER JOIN blocks B ON CT.block_hash = B.block_hash
                     WHERE PD.pushdata_hash IN ({",".join([f"X'{x}'" for x in pushdata_hashes])})"""
 
         result = self.execute(sql)
         for row in result:
-            pushdata_hash = hash_to_hex_str(row[0])
-            tx_hash = hash_to_hex_str(row[1])
-            idx = row[2]
-            ref_type = row[3]
-            in_tx_hash = None
-            if row[4]:
-                in_tx_hash = hash_to_hex_str(row[4])
-            in_idx = row[5]
-            yield {
-                "PushDataHashHex": pushdata_hash,
-                "TransactionId": tx_hash,
-                "Index": idx,
-                "ReferenceType": ref_type,
-                "SpendTransactionId": in_tx_hash,
-                "SpendInputIndex": in_idx
-            }
+            if json:
+                pushdata_hash = hash_to_hex_str(row[0])
+                tx_hash = hash_to_hex_str(row[1])
+                idx = row[2]
+                ref_type = self.get_pushdata_match_flag(row[3])
+                in_tx_hash = "00"*32
+                if row[4]:
+                    in_tx_hash = hash_to_hex_str(row[4])
+                in_idx = 2**32
+                if row[5]:
+                    in_idx = row[5]
+                block_height = row[6]
+                yield {
+                    "PushDataHashHex": pushdata_hash,
+                    "TransactionId": tx_hash,
+                    "Index": idx,
+                    "Flags": ref_type,
+                    "SpendTransactionId": in_tx_hash,
+                    "SpendInputIndex": in_idx,
+                    "BlockHeight": block_height
+                }
+            else:
+                pushdata_hash = row[0]
+                tx_hash = row[1]
+                idx = row[2]
+                ref_type = le_int_to_char(self.get_pushdata_match_flag(row[3]))
+                in_tx_hash = hex_str_to_hash("00"*32)
+                if row[4]:
+                    in_tx_hash = row[4]
+                in_idx = MAX_UINT32
+                if row[5]:
+                    in_idx = row[5]
+                block_height = row[6]
+                yield RestorationFilterResult(
+                    flags=ref_type,
+                    push_data_hash=pushdata_hash,
+                    transaction_hash=tx_hash,
+                    spend_transaction_hash=in_tx_hash,
+                    transaction_output_index=idx,
+                    spend_input_index=in_idx,
+                    block_height=block_height
+                )

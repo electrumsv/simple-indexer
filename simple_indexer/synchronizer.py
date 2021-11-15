@@ -299,7 +299,7 @@ class Synchronizer(threading.Thread):
         for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
             header: bitcoinx.Header = \
-            self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
+                self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
             self.on_block(header)
             self.connect_header(height, header.raw, headers_store='local')
 
