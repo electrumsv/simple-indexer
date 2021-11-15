@@ -11,7 +11,7 @@ from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
 from simple_indexer.types import RestorationFilterRequest, filter_response_struct, \
-    FILTER_RESPONSE_SIZE
+    FILTER_RESPONSE_SIZE, tsc_merkle_proof_json_to_binary
 
 if typing.TYPE_CHECKING:
     from simple_indexer.server import ApplicationState
@@ -131,7 +131,10 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
             hash_to_hex_str(block_hash), txid, include_full_tx, target_type).json()['result']
 
         if accept_type == 'application/octet-stream':
-            return web.Response(body=b"not implemented yet")
+            binary_response = tsc_merkle_proof_json_to_binary(tsc_merkle_proof,
+                include_full_tx=include_full_tx,
+                target_type=target_type)
+            return web.Response(body=binary_response)
         else:
             return web.json_response(data=tsc_merkle_proof)
     except requests.exceptions.HTTPError as e:
@@ -167,4 +170,9 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
                 'target': target,
                 'nodes': []
             }
-            return web.json_response(data=tsc_merkle_proof, status=200)
+            if accept_type == 'application/octet-stream':
+                binary_response = tsc_merkle_proof_json_to_binary(tsc_merkle_proof,
+                    include_full_tx=include_full_tx, target_type=target_type)
+                return web.Response(body=binary_response)
+            else:
+                return web.json_response(data=tsc_merkle_proof)
