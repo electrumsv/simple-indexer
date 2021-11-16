@@ -16,8 +16,6 @@ from bitcoinx import (
     Headers,
 )
 
-from electrumsv_sdk.utils import get_directory_name
-
 from .constants import SERVER_HOST, SERVER_PORT
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
@@ -26,7 +24,6 @@ from .sqlite_db import SQLiteDatabase
 from .utils import wait_for_initial_node_startup
 
 
-COMPONENT_NAME = get_directory_name(__file__)
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
 # Silence verbose logging
