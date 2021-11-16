@@ -34,8 +34,8 @@ aiohttp_logger = logging.getLogger("aiohttp")
 aiohttp_logger.setLevel(logging.WARNING)
 
 
-NODE_HEADERS_MMAP_FILEPATH = 'node_headers.mmap'
-LOCAL_HEADERS_MMAP_FILEPATH = 'local_headers.mmap'
+NODE_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent.joinpath('node_headers.mmap')
+LOCAL_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent.joinpath('local_headers.mmap')
 MMAP_SIZE = 100_000  # headers count - should be ample for RegTest
 CHECKPOINT = CheckPoint(
     bytes.fromhex(
