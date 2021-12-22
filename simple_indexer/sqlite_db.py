@@ -427,14 +427,14 @@ class SQLiteDatabase:
         result = self.execute(sql)
         for row in result:
             if json:
-                pushdata_hash = hash_to_hex_str(row[0])
+                pushdata_hash = row[0].hex()
                 tx_hash = hash_to_hex_str(row[1])
                 idx = row[2]
                 ref_type = self.get_pushdata_match_flag(row[3])
                 in_tx_hash = "00"*32
                 if row[4]:
                     in_tx_hash = hash_to_hex_str(row[4])
-                in_idx = 2**32
+                in_idx = MAX_UINT32
                 if row[5]:
                     in_idx = row[5]
                 block_height = row[6]
