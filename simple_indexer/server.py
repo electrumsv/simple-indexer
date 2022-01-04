@@ -157,7 +157,7 @@ def get_aiohttp_app() -> web.Application:
         web.get("/", handlers.ping),
         web.get("/error", handlers.error),
         web.get("/api/v1/endpoints", handlers.get_endpoints_data),
-        web.get("/api/v1/restoration/search", handlers.get_pushdata_filter_matches),
+        web.post("/api/v1/restoration/search", handlers.get_pushdata_filter_matches),
         web.get("/api/v1/transaction/{txid}", handlers.get_transaction),
         web.get("/api/v1/merkle-proof/{txid}", handlers.get_merkle_proof),
         web.view("/ws", SimpleIndexerWebSocket), ])

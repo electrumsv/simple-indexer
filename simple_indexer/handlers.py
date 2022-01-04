@@ -1,6 +1,6 @@
+from __future__ import annotations
 from datetime import datetime, timedelta
 import json
-import struct
 import typing
 from typing import Any, Dict
 
@@ -71,7 +71,7 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
 
 async def get_pushdata_filter_matches(request: web.Request):
     """This the main endpoint for the rapid restoration API"""
-    app_state: 'ApplicationState' = request.app['app_state']
+    app_state: ApplicationState = request.app['app_state']
     sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
@@ -112,7 +112,7 @@ async def get_pushdata_filter_matches(request: web.Request):
 
 
 async def get_transaction(request: web.Request) -> web.Response:
-    app_state: 'ApplicationState' = request.app['app_state']
+    app_state: ApplicationState = request.app['app_state']
     sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
@@ -134,35 +134,32 @@ async def get_transaction(request: web.Request) -> web.Response:
 
 
 async def get_merkle_proof(request: web.Request) -> web.Response:
+    """
+    It is expected that a valid reponse will have a content length, and should stream the data
+    if possible. This is to allow things like 4 GiB transactions to be provided within proof
+    with no server overhead over providing both proof and transaction separately.
+
+    This regtest implementation has to use the node to provide data via the JSON-RPC API and this
+    will never be streamable or scalable. But professional services would be expected to design
+    for streaming out of the box, and would not be encumbered by limitations imposed by the node.
+    """
     # Todo - use the bitcoin node as much as possible (this is only for RegTest)
-    app_state: 'ApplicationState' = request.app['app_state']
+    app_state: ApplicationState = request.app['app_state']
     sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
-    # Get block_hash
-    try:
-        txid = request.match_info['txid']
-        if not txid:
-            raise ValueError('no txid submitted')
+    txid = request.match_info['txid']
+    if not txid:
+        return web.Response(status=400, reason="no txid submitted")
 
-        block_hash = sqlite_db.get_block_hash_for_tx(hex_str_to_hash(txid))
-        if not block_hash:
-            return web.Response(status=404)
-    except ValueError:
+    block_hash = sqlite_db.get_block_hash_for_tx(hex_str_to_hash(txid))
+    if not block_hash:
+        return web.Response(status=404)
+
+    include_full_tx = request.query.get("includeFullTx") == "1"
+    target_type = request.query.get("targetType", "hash")
+    if target_type is not None and target_type not in {'hash', 'header', 'merkleroot'}:
         return web.Response(status=400)
-
-    include_full_tx = False
-    target_type = 'hash'
-    body = await request.content.read()
-    if body:
-        json_body = json.loads(body.decode('utf-8'))
-        include_full_tx = json_body.get('includeFullTx')
-        target_type = json_body.get('targetType')
-        if include_full_tx is not None and include_full_tx not in {True, False}:
-            return web.Response(status=400)
-
-        if target_type is not None and target_type not in {'hash', 'header', 'merkleroot'}:
-            return web.Response(status=400)
 
     # Request TSC merkle proof from the node
     # Todo - binary format not currently supported by the node
@@ -172,8 +169,7 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
 
         if accept_type == 'application/octet-stream':
             binary_response = tsc_merkle_proof_json_to_binary(tsc_merkle_proof,
-                include_full_tx=include_full_tx,
-                target_type=target_type)
+                include_full_tx=include_full_tx, target_type=target_type)
             return web.Response(body=binary_response)
         else:
             return web.json_response(data=tsc_merkle_proof)

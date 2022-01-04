@@ -15,7 +15,7 @@ from bitcoinx import hash_to_hex_str, hex_str_to_hash
 
 from simple_indexer.constants import MAX_UINT32
 from simple_indexer.types import RestorationFilterRequest, RestorationFilterJSONResponse, \
-    RestorationFilterResult, le_int_to_char
+    RestorationFilterResult
 
 
 class LeakedSQLiteConnectionError(Exception):
@@ -388,8 +388,8 @@ class SQLiteDatabase:
 
             # Run SELECT query to find txs that have already been processed
             sql = ("""
-                SELECT mp_tx_hash 
-                FROM mempool_transactions 
+                SELECT mp_tx_hash
+                FROM mempool_transactions
                 JOIN mined_tx_hashes ON tx_hash = mp_tx_hash;""")
 
             processed_tx_hashes = set()
@@ -413,15 +413,24 @@ class SQLiteDatabase:
             return 1 << 0
         if ref_type == 1:
             return 1 << 1
+        raise NotImplementedError
 
     # Todo - make this a generator
     def get_pushdata_filter_matches(self, pushdata_hashes: RestorationFilterRequest, json=True) \
             -> Generator[Union[RestorationFilterJSONResponse, RestorationFilterResult], None, None]:
-        sql = f"""SELECT PD.pushdata_hash, PD.tx_hash, PD.idx, PD.ref_type, IT.in_tx_hash, IT.in_idx , B.block_height
+        # The matched transaction id will either be:
+        # - Where the pushdata is found in an input script (flags & 1<<1 != 0).
+        #   - This means the index value is the index of a transaction input.
+        #   - There will never be any spent transaction id or index for this match.
+        # - Where the pushdata is found in an output script (flags & 1<<0 != 0).
+        #   - This means the index value is the index of a transaction output.
+        #   - There should always be any spent transaction id or index for this match.
+        #     - The restoration index is intended to only server mined transactions and not
+        #       mempool
+        sql = f"""SELECT PD.pushdata_hash, PD.tx_hash, PD.idx, PD.ref_type, IT.in_tx_hash, IT.in_idx
                     FROM pushdata PD
                     LEFT JOIN inputs IT ON PD.tx_hash=IT.out_tx_hash AND PD.idx=IT.out_idx AND PD.ref_type=0
                     INNER JOIN confirmed_transactions CT ON PD.tx_hash = CT.tx_hash
-                    INNER JOIN blocks B ON CT.block_hash = B.block_hash
                     WHERE PD.pushdata_hash IN ({",".join([f"X'{x}'" for x in pushdata_hashes])})"""
 
         result = self.execute(sql)
@@ -429,42 +438,35 @@ class SQLiteDatabase:
             if json:
                 pushdata_hash = hash_to_hex_str(row[0])
                 tx_hash = hash_to_hex_str(row[1])
-                idx = row[2]
+                idx: int = row[2]
                 ref_type = self.get_pushdata_match_flag(row[3])
                 in_tx_hash = "00"*32
                 if row[4]:
                     in_tx_hash = hash_to_hex_str(row[4])
-                in_idx = 2**32
+                in_idx: int = 2**32
                 if row[5]:
                     in_idx = row[5]
-                block_height = row[6]
-                yield {
-                    "PushDataHashHex": pushdata_hash,
-                    "TransactionId": tx_hash,
-                    "Index": idx,
-                    "Flags": ref_type,
-                    "SpendTransactionId": in_tx_hash,
-                    "SpendInputIndex": in_idx,
-                    "BlockHeight": block_height
+                json_match: RestorationFilterJSONResponse = {
+                    "pushDataHashHex": pushdata_hash,
+                    "lockingTransactionId": tx_hash,
+                    "lockingTransactionIndex": idx,
+                    "flags": ref_type,
+                    "unlockingTransactionId": in_tx_hash,
+                    "unlockingInputIndex": in_idx
                 }
+                yield json_match
             else:
                 pushdata_hash = row[0]
                 tx_hash = row[1]
                 idx = row[2]
-                ref_type = le_int_to_char(self.get_pushdata_match_flag(row[3]))
-                in_tx_hash = hex_str_to_hash("00"*32)
-                if row[4]:
-                    in_tx_hash = row[4]
-                in_idx = MAX_UINT32
-                if row[5]:
-                    in_idx = row[5]
-                block_height = row[6]
+                ref_type = self.get_pushdata_match_flag(row[3])
+                in_tx_hash = row[4] if row[4] else hex_str_to_hash("00"*32)
+                in_idx = row[5] if row[5] else 0
                 yield RestorationFilterResult(
                     flags=ref_type,
                     push_data_hash=pushdata_hash,
-                    transaction_hash=tx_hash,
-                    spend_transaction_hash=in_tx_hash,
-                    transaction_output_index=idx,
-                    spend_input_index=in_idx,
-                    block_height=block_height
+                    locking_transaction_hash=tx_hash,
+                    locking_output_index=idx,
+                    unlocking_transaction_hash=in_tx_hash,
+                    unlocking_input_index=in_idx
                 )

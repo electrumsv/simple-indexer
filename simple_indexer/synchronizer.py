@@ -334,13 +334,14 @@ class Synchronizer(threading.Thread):
             self.on_block(new_header)
             self.connect_header(local_tip_height+1, new_header.raw, headers_store='local')
 
-        self.logger.debug(f"Initial block download complete. Waiting for the next block...")
+        self.logger.debug("Initial block download complete. Waiting for the next block...")
         self.is_ibd = True
-        self.logger.debug(f"Requesting mempool...")
+        self.logger.debug("Requesting mempool...")
         mempool_tx_hashes = electrumsv_node.call_any('getrawmempool').json()['result']
         for tx_hash in mempool_tx_hashes:
             self.on_tx(tx_hash)
 
+        self.logger.debug("Listening to node ZMQ...")
         # Wait on zmq pub/sub socket for new tip
         context: zmq.Context = zmq.Context()
         work_receiver: zmq.Socket = context.socket(zmq.SUB)
