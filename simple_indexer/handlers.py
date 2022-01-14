@@ -191,6 +191,7 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
             if include_full_tx:
                 txOrId = rawtx
 
+            target_type: str = ""
             if target_type == 'hash':
                 target = blockhash
             elif target_type == 'header':

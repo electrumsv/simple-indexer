@@ -6,20 +6,19 @@ import time
 import typing
 
 import bitcoinx
+import requests
 import zmq
-from bitcoinx import hex_str_to_hash, hash_to_hex_str, double_sha256
+from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
 from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX, \
     NULL_HASH, GENESIS_HASH
 from .parse_pushdata import get_pushdata_from_script
 from .utils import wait_for_initial_node_startup
-from .sqlite_db import SQLiteDatabase
+
 
 if typing.TYPE_CHECKING:
     from .server import ApplicationState
-
-from typing import Optional
 
 
 class Synchronizer(threading.Thread):
@@ -66,11 +65,14 @@ class Synchronizer(threading.Thread):
         # and do not get "stuck". Otherwise the main thread will stay running.
         # The alternative is uncontrolled killing of the threads (because they'd be daemon threads)
         # but I find that unacceptable for this use-case.
-        maintain_chain_tip_thread = threading.Thread(target=self.maintain_chain_tip_thread)
-        process_mempool_txs_thread = threading.Thread(target=self.process_new_txs_thread)
+        self._initial_sync_complete = threading.Event()
 
+        maintain_chain_tip_thread = threading.Thread(target=self.maintain_chain_tip_thread)
+        poll_node_thread = threading.Thread(target=self.poll_node_tip_thread)
+        process_mempool_txs_thread = threading.Thread(target=self.process_new_txs_thread)
         self.threads = (
             maintain_chain_tip_thread,
+            poll_node_thread,
             process_mempool_txs_thread,
         )
 
@@ -190,12 +192,12 @@ class Synchronizer(threading.Thread):
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
         all_mined_tx_hashes = processed_tx_hashes | unprocessed_txs_hashes
-        self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in all_mined_tx_hashes]}")
+        # self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in all_mined_tx_hashes]}")
         self.sqlite_db.invalidate_mempool(all_mined_tx_hashes)
 
     def on_block(self, new_tip: bitcoinx.Header) -> None:
         block_hash_hex = hash_to_hex_str(new_tip.hash)
-        self.logger.debug(f"Got blockhash: {block_hash_hex}")
+        # self.logger.debug(f"Got blockhash: {block_hash_hex}")
         rawblock_hex = electrumsv_node.call_any('getblock', block_hash_hex, 0).json()['result']
         rawblock = bytes.fromhex(rawblock_hex)
         rawblock_stream = io.BytesIO(rawblock)
@@ -222,24 +224,24 @@ class Synchronizer(threading.Thread):
             if headers_store == 'node':
                 self.app_state.node_headers.connect(raw_header)
                 self.app_state.node_headers.flush()
-                self.logger.debug(f"Connected header (node store) height: {height}; "
-                                  f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
+                # self.logger.debug(f"Connected header (node store) height: {height}; "
+                #                   f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
             else:
                 self.app_state.local_headers.connect(raw_header)
                 self.app_state.local_headers.flush()
-                self.logger.debug(f"Connected header (local store) tip height: {height}; "
-                                  f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
+                # self.logger.debug(f"Connected header (local store) tip height: {height}; "
+                #                   f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
 
         except bitcoinx.MissingHeader as e:
             if str(e).find(GENESIS_HASH) != -1 or str(e).find(NULL_HASH) != -1:
                 if headers_store == 'node':
                     self.app_state.node_headers.set_one(height, raw_header)
                     self.app_state.node_headers.flush()
-                    self.logger.debug("Got genesis block or null hash")
+                    # self.logger.debug("Got genesis block or null hash")
                 else:
                     self.app_state.local_headers.set_one(height, raw_header)
                     self.app_state.local_headers.flush()
-                    self.logger.debug("Got genesis block or null hash")
+                    # self.logger.debug("Got genesis block or null hash")
             else:
                 # self.logger.exception(e)
                 raise
@@ -307,15 +309,18 @@ class Synchronizer(threading.Thread):
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
         new_best_tip: dict = electrumsv_node.call_any('getblockheader', block_hash_new_tip, True).json()['result']
-        self.logger.debug(f"New best tip height: {new_best_tip['height']}. "
+        self.logger.info(f"New tip received height: {new_best_tip['height']}. "
                           f"Stored node height: {stored_node_tip.height}")
-
         try:
             self.sync_node_block_headers(to_height=new_best_tip['height'],
                 from_height=new_best_tip['height'])
             self.sync_blocks(from_height=new_best_tip['height'], to_height=new_best_tip['height'])
         except bitcoinx.MissingHeader:
             self.on_reorg(stored_node_tip, new_best_tip['height'])
+        finally:
+            new_tip = self.app_state.node_headers.longest_chain().tip
+            self.logger.info(f"New best tip height: {new_tip}, "
+                             f"hash: {hash_to_hex_str(new_tip.hash)}")
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
@@ -330,10 +335,16 @@ class Synchronizer(threading.Thread):
 
         while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
             local_tip_height = self.app_state.local_headers.longest_chain().tip.height
-            new_header: bitcoinx.Header = self.app_state.node_headers.header_at_height(self.app_state.node_headers.longest_chain(), local_tip_height+1)
+            new_header: bitcoinx.Header = self.app_state.node_headers.header_at_height(
+                self.app_state.node_headers.longest_chain(), local_tip_height+1)
             self.on_block(new_header)
             self.connect_header(local_tip_height+1, new_header.raw, headers_store='local')
 
+        self._initial_sync_complete.set()
+
+        new_tip = self.app_state.node_headers.longest_chain().tip
+        self.logger.info(f"New best tip height: {new_tip.height}, "
+            f"hash: {hash_to_hex_str(new_tip.hash)}")
         self.logger.debug("Initial block download complete. Waiting for the next block...")
         self.is_ibd = True
         self.logger.debug("Requesting mempool...")
@@ -369,6 +380,30 @@ class Synchronizer(threading.Thread):
             logger.info("Closing maintain_chain_tip_thread thread")
             work_receiver.close()
             context.term()
+
+    def poll_node_tip_thread(self):
+        """Continually poll the node for chain tip every 5 seconds. This is because ZMQ
+        notifications are not received for RegTest blocks with old timestamps so if the node
+        only has old timestamp blocks loaded, we can only find out via the RPC API."""
+        logger = logging.getLogger("poll-node-tip-thread")
+        self._initial_sync_complete.wait()
+        logger.info("Starting thread to poll for node tip")
+        while self.app_state.app.is_alive:
+            try:
+                result = electrumsv_node.call_any('getblockchaininfo').json()['result']
+                node_tip_height = result['headers']
+                while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
+                    node_tip_height = electrumsv_node.call_any('getblockchaininfo') \
+                                                     .json()['result']['headers']
+                    local_height = self.app_state.local_headers.longest_chain().tip.height
+                    next_block_hash_in_sequence: str = \
+                        electrumsv_node.call_any('getblockhash', local_height + 1).json()['result']
+                    self.on_new_tip(next_block_hash_in_sequence)
+            except requests.exceptions.HTTPError:
+                logger.info("Error polling node. Retrying in 5 seconds")
+            finally:
+                time.sleep(5)
+
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'

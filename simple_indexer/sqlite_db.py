@@ -362,11 +362,19 @@ class SQLiteDatabase:
         sql = ("""DROP TABLE IF EXISTS mined_tx_hashes""")
         self.execute(sql)
 
+    def get_transaction_mempool(self, tx_hash: bytes) -> Optional[bytes]:
+        sql = f"""SELECT rawtx FROM mempool_transactions WHERE mp_tx_hash = ?"""
+        result = self.execute(sql, params=(tx_hash,))
+        if len(result) == 0:
+            return
+        rawtx = result[0][0]
+        return rawtx
+
     def get_transaction(self, tx_hash: bytes) -> Optional[bytes]:
         sql = f"""SELECT rawtx FROM confirmed_transactions WHERE tx_hash = ?"""
         result = self.execute(sql, params=(tx_hash,))
         if len(result) == 0:
-            return
+            return self.get_transaction_mempool(tx_hash)
         rawtx = result[0][0]
         return rawtx
 
