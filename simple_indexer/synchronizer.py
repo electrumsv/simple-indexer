@@ -3,21 +3,21 @@ import logging
 import queue
 import threading
 import time
-import typing
+from typing import Optional, TYPE_CHECKING
 
 import bitcoinx
-import requests
-import zmq
 from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
+import requests
+import zmq
 
 from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX, \
     NULL_HASH, GENESIS_HASH
 from .parse_pushdata import get_pushdata_from_script
+from .types import OutpointType, output_spend_struct, OutputSpendRow
 from .utils import wait_for_initial_node_startup
 
-
-if typing.TYPE_CHECKING:
+if TYPE_CHECKING:
     from .server import ApplicationState
 
 
@@ -52,13 +52,15 @@ class Synchronizer(threading.Thread):
     be at least 1 tx in the "Unprocessed" category for each block.
     """
 
-    def __init__(self, app_state: 'ApplicationState', ws_queue: queue.Queue[str]):
+    def __init__(self, app_state: 'ApplicationState', ws_queue: queue.Queue[bytes]):
         threading.Thread.__init__(self, daemon=True)
         self.logger = logging.getLogger("blockchain-state-monitor")
         self.app_state = app_state
         self.ws_queue = ws_queue
         self.sqlite_db = self.app_state.sqlite_db
         self.is_ibd = False  # Set to True when initial block download is complete
+
+        self._unspent_output_registrations: set[OutpointType] = set()
 
         wait_for_initial_node_startup(self.logger)
         # NOTE: These are NOT daemon threads so must take care that all of them shutdown gracefully
@@ -184,10 +186,18 @@ class Synchronizer(threading.Thread):
 
         self.insert_tx_rows(block_hash, txs)
         for tx in txs:
-            if tx.hash() in unprocessed_txs_hashes:
+            tx_hash = tx.hash()
+            if tx_hash in unprocessed_txs_hashes:
                 self.insert_txo_rows([tx])
                 self.insert_input_rows([tx])
                 self.insert_pushdata_rows([tx])
+
+            # Dispatch any spent output notifications.
+            for in_idx, tx_input in enumerate(tx.inputs):
+                outpoint = tx_input.prev_hash, tx_input.prev_idx
+                if outpoint in self._unspent_output_registrations:
+                    self._broadcast_spent_output_event(tx_input.prev_hash, tx_input.prev_idx,
+                            tx_hash, in_idx, None)
 
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
@@ -204,20 +214,35 @@ class Synchronizer(threading.Thread):
         self.parse_block(new_tip.hash, rawblock_stream)
         self.sqlite_db.insert_block_row(new_tip.hash, new_tip.height, rawblock)
 
-    def on_tx(self, tx_hash: str):
-        rawtx = electrumsv_node.call_any('getrawtransaction', tx_hash, 1).json()['result']
+    def on_tx(self, tx_id: str):
+        rawtx = electrumsv_node.call_any('getrawtransaction', tx_id, 1).json()['result']
         tx = bitcoinx.Tx.from_hex(rawtx['hex'])
         is_confirmed = rawtx.get('blockhash', False)
         is_mempool = not is_confirmed
         if is_mempool:
             # There is no batch-wise processing because we don't care about performance
-            self.logger.debug(f"Got mempool tx_hash: {tx_hash}")
+            self.logger.debug(f"Got mempool tx_hash: {tx_id}")
             self.insert_mempool_tx_rows([tx])
             self.insert_txo_rows([tx])
             self.insert_input_rows([tx])
             self.insert_pushdata_rows([tx])
+
+            tx_hash = hex_str_to_hash(tx_id)
+            for in_idx, tx_input in enumerate(tx.inputs):
+                outpoint = tx_input.prev_hash, tx_input.prev_idx
+                if outpoint in self._unspent_output_registrations:
+                    self._broadcast_spent_output_event(tx_input.prev_hash, tx_input.prev_idx,
+                            tx_hash, in_idx, None)
         else:
             pass
+
+    def _broadcast_spent_output_event(self, out_tx_hash: bytes, out_idx: int,
+            in_tx_hash: bytes, in_idx: int, block_hash: Optional[bytes]) -> None:
+        message_bytes = output_spend_struct.pack(out_tx_hash, out_idx, in_tx_hash, in_idx,
+            block_hash)
+        # We do not provide any kind of message envelope at this time as this is the only
+        # kind of message we send.
+        self.ws_queue.put(message_bytes, block=False)
 
     def connect_header(self, height: int, raw_header: bytes, headers_store: str):
         try:
@@ -438,3 +463,23 @@ class Synchronizer(threading.Thread):
             logger.info("Closing maintain_chain_tip_thread thread")
             work_receiver.close()
             context.term()
+
+    def register_output_spend_notifications(self, outpoints: list[OutpointType]) \
+            -> list[OutputSpendRow]:
+        # We register all the provided outpoints for notifications.
+        # - We do this before we query the results to ensure there is overlap on getting the
+        #   current state and broadcasting changes, so that the caller does not miss out on
+        #   events that might otherwise be between a get state followed by a register for
+        #   notifications.
+        # - Ideally registered outpoints would be pruned as blocks get enough confirmations and
+        #   reorgs are no longer possible. But this is the simple indexer, it is enough to note
+        #   this flaw and move on.
+        # - The sole consumer of this API is the reference server, and it can track what where
+        #   to pass notifications for these events.
+        for outpoint in outpoints:
+            self._unspent_output_registrations.add(outpoint)
+
+        # We need to find out if the outpoints are spent, and where. We can return the results
+        # immediately. Otherwise we should send notifications on any open web socket.
+        return self.sqlite_db.get_spent_outpoints(outpoints)
+

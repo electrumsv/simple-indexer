@@ -2,20 +2,20 @@
 ElectrumSV's wallet_database/sqlite_support.py and helps to avoid the overhead associated with
 creating a new db connection"""
 
+from __future__ import annotations
 import logging
 import os
 import queue
 import sqlite3
-import struct
 import threading
 from pathlib import Path
-from typing import Set, List, Optional, Generator, Union
+from typing import Any, Collection, Generator, List, Optional, Sequence, Set, Type, TypeVar, Union
 
 from bitcoinx import hash_to_hex_str, hex_str_to_hash
 
-from simple_indexer.constants import MAX_UINT32
-from simple_indexer.types import RestorationFilterRequest, RestorationFilterJSONResponse, \
-    RestorationFilterResult
+from .constants import MAX_UINT32
+from .types import OutpointType, OutputSpendRow, RestorationFilterRequest, \
+    RestorationFilterJSONResponse, RestorationFilterResult
 
 
 class LeakedSQLiteConnectionError(Exception):
@@ -58,6 +58,31 @@ def max_sql_variables() -> int:
 #   https://github.com/electrumsv/electrumsv/issues/539
 SQLITE_MAX_VARS = max_sql_variables()
 SQLITE_EXPR_TREE_DEPTH = 1000
+
+T = TypeVar('T')
+T2 = TypeVar('T2')
+
+
+def read_rows_by_ids(return_type: Type[T], db: SQLiteDatabase, sql: str, sql_condition: str,
+        sql_values: List[Any], ids: Sequence[Collection[T2]]) -> List[T]:
+    """
+    Read rows in batches as constrained by database limitations.
+    """
+    batch_size = min(SQLITE_MAX_VARS, SQLITE_EXPR_TREE_DEPTH) // 2 - len(sql_values)
+    results: List[T] = []
+    remaining_ids = ids
+    while len(remaining_ids):
+        batch = remaining_ids[:batch_size]
+        batch_values: List[Any] = list(sql_values)
+        for batch_entry in batch:
+            batch_values.extend(batch_entry)
+        conditions = [ sql_condition ] * len(batch)
+        batch_query = (sql +" WHERE "+ " OR ".join(conditions))
+        db_rows = db.execute(batch_query, batch_values)
+        results.extend(return_type(*row) for row in db_rows)
+        remaining_ids = remaining_ids[batch_size:]
+    return results
+
 
 
 class SQLiteDatabase:
@@ -125,7 +150,7 @@ class SQLiteDatabase:
     def is_closed(self) -> bool:
         return self._connection_pool.qsize() == 0
 
-    def execute(self, sql: str, params: Optional[tuple]=None) -> List:
+    def execute(self, sql: str, params: Optional[Collection]=None) -> List:
         """Thread-safe"""
         connection = self.acquire_connection()
         try:
@@ -478,3 +503,12 @@ class SQLiteDatabase:
                     unlocking_transaction_hash=in_tx_hash,
                     unlocking_input_index=in_idx
                 )
+
+    def get_spent_outpoints(self, entries: list[OutpointType]) -> list[OutputSpendRow]:
+        sql = f"""
+        SELECT I.out_tx_hash, I.out_idx, I.in_tx_hash, I.in_idx, CT.block_hash
+        FROM inputs I
+        LEFT JOIN confirmed_transactions CT ON CT.tx_hash = I.in_tx_hash
+        """
+        sql_condition = "I.out_tx_hash=? AND I.out_idx=?"
+        return read_rows_by_ids(OutputSpendRow, self, sql, sql_condition, [], entries)

@@ -1,8 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 import json
-import typing
-from typing import Any, Dict
+from typing import Any, cast, Dict, Optional, TYPE_CHECKING
 
 import aiohttp
 import requests
@@ -13,10 +12,11 @@ from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
 from .constants import SERVER_HOST, SERVER_PORT
-from .types import RestorationFilterRequest, filter_response_struct, \
-    FILTER_RESPONSE_SIZE, tsc_merkle_proof_json_to_binary
+from .types import FILTER_RESPONSE_SIZE, filter_response_struct, outpoint_struct, \
+    OutpointJSONType, output_spend_struct, OutpointType, RestorationFilterRequest, \
+    tsc_merkle_proof_json_to_binary
 
-if typing.TYPE_CHECKING:
+if TYPE_CHECKING:
     from .server import ApplicationState
     from .sqlite_db import SQLiteDatabase
 
@@ -52,6 +52,11 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
                 "apiType": "bsvapi.merkle-proof",
                 "apiVersion": 1,
                 "baseURL": "/api/v1/merkle-proof",
+            },
+            {
+                "apiType": "bsvapi.unspent-output",
+                "apiVersion": 1,
+                "baseURL": "/api/v1/unspent-output",
             },
             {
                 "apiType": "bsvapi.restoration",
@@ -213,3 +218,114 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
                 return web.Response(body=binary_response)
             else:
                 return web.json_response(data=tsc_merkle_proof)
+
+
+async def post_output_spends(request: web.Request) -> web.Response:
+    """
+    Return the metadata for each provided outpoint if they are spent.
+    """
+    accept_type = request.headers.get('Accept')
+    content_type = request.headers.get('Content-Type')
+    body = await request.content.read()
+    if not body:
+        raise web.HTTPBadRequest(reason="no body")
+
+    client_outpoints: list[OutpointType] = []
+    if content_type == 'application/json':
+        # Convert the incoming JSON representation to the internal binary representation.
+        client_outpoints_json: list[OutpointJSONType] = json.loads(body.decode('utf-8'))
+        if not isinstance(client_outpoints_json, list):
+            raise web.HTTPBadRequest(reason="payload is not a list")
+        for entry in client_outpoints_json:
+            if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[1], int):
+                raise web.HTTPBadRequest(reason="one or more payload entries are incorrect")
+            try:
+                tx_hash = hex_str_to_hash(entry[0])
+            except (ValueError, TypeError):
+                raise web.HTTPBadRequest(reason="one or more payload entries are incorrect")
+            client_outpoints.append((tx_hash, entry[1]))
+    elif content_type == 'application/octet-stream':
+        raise web.HTTPBadRequest(reason="binary request body support not implemented yet")
+    else:
+        raise web.HTTPBadRequest(reason="unknown request body content type")
+
+    app_state: ApplicationState = request.app['app_state']
+    sqlite_db: SQLiteDatabase = app_state.sqlite_db
+    existing_rows = sqlite_db.get_spent_outpoints(client_outpoints)
+
+    if accept_type == 'application/octet-stream':
+        result_bytes = b""
+        for row in existing_rows:
+            result_bytes += output_spend_struct.pack(row.out_tx_hash, row.out_idx,
+                row.in_tx_hash, row.in_idx, row.block_hash if row.block_hash else bytes(32))
+        return web.Response(body=result_bytes)
+    else:
+        json_list: list[tuple[str, int, str, int, Optional[str]]] = []
+        for row in existing_rows:
+            json_list.append((hash_to_hex_str(row.out_tx_hash), row.out_idx,
+                hash_to_hex_str(row.in_tx_hash), row.in_idx,
+                row.block_hash.hex() if row.block_hash else None))
+        return web.json_response(data=json.dumps(json_list))
+
+
+async def post_output_spend_notifications(request: web.Request) -> web.Response:
+    """
+    Register the caller provided UTXO references so that we send notifications if they get
+    spent. We also return the current state for any that are known as a response.
+
+    This is a bit clumsy, but this is the simple indexer and it is intended to be the minimum
+    effort to allow ElectrumSV to be used against regtest. It is expected that the caller
+    has connected to the notification web socket before making this call, and can keep up
+    with the notifications.
+    """
+    accept_type = request.headers.get('Accept')
+    content_type = request.headers.get('Content-Type')
+    body = await request.content.read()
+    if not body:
+        raise web.HTTPBadRequest(reason="no body")
+
+    client_outpoints: list[OutpointType] = []
+    if content_type == 'application/json':
+        # Convert the incoming JSON representation to the internal binary representation.
+        client_outpoints_json: list[OutpointJSONType] = json.loads(body.decode('utf-8'))
+        if not isinstance(client_outpoints_json, list):
+            raise web.HTTPBadRequest(reason="payload is not a list")
+        for entry in client_outpoints_json:
+            if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[1], int):
+                raise web.HTTPBadRequest(reason="one or more payload entries are incorrect")
+            try:
+                tx_hash = hex_str_to_hash(entry[0])
+            except (ValueError, TypeError):
+                raise web.HTTPBadRequest(reason="one or more payload entries are incorrect")
+            client_outpoints.append((tx_hash, entry[1]))
+    elif content_type == 'application/octet-stream':
+        if len(body) % outpoint_struct.size != 0:
+            raise web.HTTPBadRequest(reason="binary request body malformed")
+
+        for outpoint_index in range(len(body) // outpoint_struct.size):
+            outpoint = cast(OutpointType,
+                outpoint_struct.unpack_from(body, outpoint_index * outpoint_struct.size))
+            client_outpoints.append(outpoint)
+    else:
+        raise web.HTTPBadRequest(reason="unknown request body content type")
+
+    app_state: ApplicationState = request.app['app_state']
+    synchronizer = app_state.blockchain_state_monitor_thread
+    if synchronizer is None:
+        raise web.HTTPInternalServerError(reason="error finding synchronizer")
+
+    existing_rows = synchronizer.register_output_spend_notifications(client_outpoints)
+
+    if accept_type == 'application/octet-stream':
+        result_bytes = b""
+        for row in existing_rows:
+            result_bytes += output_spend_struct.pack(row.out_tx_hash, row.out_idx,
+                row.in_tx_hash, row.in_idx, row.block_hash if row.block_hash else bytes(32))
+        return web.Response(body=result_bytes)
+    else:
+        json_list: list[tuple[str, int, str, int, Optional[str]]] = []
+        for row in existing_rows:
+            json_list.append((hash_to_hex_str(row.out_tx_hash), row.out_idx,
+                hash_to_hex_str(row.in_tx_hash), row.in_idx,
+                row.block_hash.hex() if row.block_hash else None))
+        return web.json_response(data=json.dumps(json_list))

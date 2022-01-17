@@ -21,7 +21,6 @@ from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
 from .synchronizer import Synchronizer
 from .sqlite_db import SQLiteDatabase
-from .utils import wait_for_initial_node_startup
 
 
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -58,8 +57,7 @@ class ApplicationState(object):
         self.ws_clients: Dict[str, WSClient] = {}
         self.ws_clients_lock: threading.RLock = threading.RLock()
 
-        self.ws_queue: queue.Queue[str] = queue.Queue()  # json only
-        self.commands_queue: queue.Queue[str] = queue.Queue()  # json only
+        self.ws_queue: queue.Queue[bytes] = queue.Queue()
         self.blockchain_state_monitor_thread: Optional[Synchronizer] = None
         self.sqlite_db = SQLiteDatabase(MODULE_DIR.parent / 'simple_index.db')
 
@@ -88,7 +86,6 @@ class ApplicationState(object):
 
     def start_threads(self):
         threading.Thread(target=self.push_notifications_thread, daemon=True).start()
-        threading.Thread(target=self.handle_websocket_messages_thread).start()
 
         self.blockchain_state_monitor_thread = Synchronizer(self, self.ws_queue)
         self.blockchain_state_monitor_thread.start()
@@ -101,48 +98,28 @@ class ApplicationState(object):
         with self.ws_clients_lock:
             self.ws_clients[ws_client.ws_id] = ws_client
 
-    def remove_ws_client(self, ws_client: WSClient) -> None:
+    def remove_ws_client_by_id(self, ws_id: str) -> None:
         with self.ws_clients_lock:
-            del self.ws_clients[ws_client.ws_id]
+            del self.ws_clients[ws_id]
 
     def push_notifications_thread(self) -> None:
         """Emits any notifications from the queue to all connected websockets"""
         try:
             while self.app.is_alive:
                 try:
-                    json_msg = self.ws_queue.get(timeout=0.5)
+                    message_bytes = self.ws_queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
-                self.logger.debug(f"Got from ws_queue: {json_msg}")
-                if not len(self.get_ws_clients()):
-                    continue
 
-                for ws_id, ws_client in self.get_ws_clients().items():
+                self.logger.debug(f"Got from ws_queue: message with length {len(message_bytes)}")
+                for ws_client in self.get_ws_clients().values():
                     # self.logger.debug(f"Sending msg to ws_id: {ws_client.ws_id}")
-                    asyncio.run_coroutine_threadsafe(ws_client.websocket.send_str(json_msg),
+                    asyncio.run_coroutine_threadsafe(ws_client.websocket.send_bytes(message_bytes),
                         self.loop)
         except Exception:
             self.logger.exception("unexpected exception in push_notifications_thread")
         finally:
             self.logger.info("Closing push notifications thread")
-
-    def handle_websocket_messages_thread(self) -> None:
-        """This is used for more complex commands or commands that change application state
-        in some way"""
-
-        try:
-            wait_for_initial_node_startup(self.logger)
-            while self.app.is_alive:
-                try:
-                    json_msg = self.commands_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                self.logger.debug(f"Got from commands_queue: {json_msg}")
-
-        except Exception:
-            self.logger.exception("unexpected exception in handle_websocket_messages_thread")
-        finally:
-            self.logger.info("Closing handle_websocket_messages_thread")
 
 
 def get_aiohttp_app() -> web.Application:
@@ -160,6 +137,8 @@ def get_aiohttp_app() -> web.Application:
         web.post("/api/v1/restoration/search", handlers.get_pushdata_filter_matches),
         web.get("/api/v1/transaction/{txid}", handlers.get_transaction),
         web.get("/api/v1/merkle-proof/{txid}", handlers.get_merkle_proof),
+        web.post("/api/v1/output-spend", handlers.post_output_spends),
+        web.post("/api/v1/output-spend/notifications", handlers.post_output_spend_notifications),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
 

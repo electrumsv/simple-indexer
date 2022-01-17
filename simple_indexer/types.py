@@ -1,13 +1,32 @@
 import enum
 import struct
 import typing
-from typing import TypedDict, Optional, NamedTuple, Dict
+from typing import Dict, Optional, NamedTuple, TypedDict
 
 import bitcoinx
 
 
-class RestorationFilterRequest(typing.TypedDict):
-    filterKeys: typing.List[str]
+OutpointType = tuple[bytes, int]
+OutpointJSONType = tuple[str, int]
+
+
+class OutputSpendRow(NamedTuple):
+    out_tx_hash: bytes
+    out_idx: int
+    in_tx_hash: bytes
+    in_idx: int
+    block_hash: Optional[bytes]
+
+
+OUTPUT_SPEND_FORMAT = ">32sI32sI32s"
+output_spend_struct = struct.Struct(OUTPUT_SPEND_FORMAT)
+
+OUTPOINT_FORMAT = ">32sI"
+outpoint_struct = struct.Struct(OUTPOINT_FORMAT)
+
+
+class RestorationFilterRequest(TypedDict):
+    filterKeys: list[str]
 
 
 class RestorationFilterJSONResponse(TypedDict):
