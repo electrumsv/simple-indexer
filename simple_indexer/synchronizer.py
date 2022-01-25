@@ -68,6 +68,7 @@ class Synchronizer(threading.Thread):
         # The alternative is uncontrolled killing of the threads (because they'd be daemon threads)
         # but I find that unacceptable for this use-case.
         self._initial_sync_complete = threading.Event()
+        self._on_new_tip_lock = threading.RLock()
 
         maintain_chain_tip_thread = threading.Thread(target=self.maintain_chain_tip_thread)
         poll_node_thread = threading.Thread(target=self.poll_node_tip_thread)
@@ -337,14 +338,15 @@ class Synchronizer(threading.Thread):
         self.logger.info(f"New tip received height: {new_best_tip['height']}. "
                           f"Stored node height: {stored_node_tip.height}")
         try:
-            self.sync_node_block_headers(to_height=new_best_tip['height'],
-                from_height=new_best_tip['height'])
-            self.sync_blocks(from_height=new_best_tip['height'], to_height=new_best_tip['height'])
+            if new_best_tip['height'] > self.app_state.local_headers.longest_chain().height:
+                self.sync_node_block_headers(to_height=new_best_tip['height'],
+                    from_height=new_best_tip['height'])
+                self.sync_blocks(from_height=new_best_tip['height'], to_height=new_best_tip['height'])
         except bitcoinx.MissingHeader:
             self.on_reorg(stored_node_tip, new_best_tip['height'])
         finally:
             new_tip = self.app_state.node_headers.longest_chain().tip
-            self.logger.info(f"New best tip height: {new_tip}, "
+            self.logger.info(f"New best tip height: {new_tip.height}, "
                              f"hash: {hash_to_hex_str(new_tip.hash)}")
 
     # Thread -> push to queue
@@ -396,7 +398,8 @@ class Synchronizer(threading.Thread):
                     if len(msg) == 32:
                         block_hash = msg.hex()
                         logger.debug(f"Got {block_hash} from 'hashblock' sub")
-                        self.on_new_tip(block_hash)
+                        with self._on_new_tip_lock:
+                            self.on_new_tip(block_hash)
                 except zmq.error.Again:
                     continue
                 except Exception:
@@ -423,7 +426,8 @@ class Synchronizer(threading.Thread):
                     local_height = self.app_state.local_headers.longest_chain().tip.height
                     next_block_hash_in_sequence: str = \
                         electrumsv_node.call_any('getblockhash', local_height + 1).json()['result']
-                    self.on_new_tip(next_block_hash_in_sequence)
+                    with self._on_new_tip_lock:
+                        self.on_new_tip(next_block_hash_in_sequence)
             except requests.exceptions.HTTPError:
                 logger.info("Error polling node. Retrying in 5 seconds")
             finally:
