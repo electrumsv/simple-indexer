@@ -64,3 +64,12 @@ This represents a reorging of the ElectrumSV transactions
 in blockchain_115_3677f4 (from heights 111-115) to a new block height of 116 
 (block hash 685adce71612e34553bed7166e2cfaa3eed6df8ff1c030b7a4977627d8515eab)
 See `generate_reorg_blocks.py` for the script that was used to create these blocks
+
+blockchain_117_28c2d3
+---------------------
+This represents a reorging of the ElectrumSV transactions 
+in `blockchain_115_3677f4` (from heights 111-115) to a new block height of 116 
+(block hash 685adce71612e34553bed7166e2cfaa3eed6df8ff1c030b7a4977627d8515eab)
+- Another random block, height 117 is added ontop to leave room for generating
+a block ontop of `blockchain_115_3677f4` to take the node out of initial block
+download mode.
