@@ -14,7 +14,7 @@ from electrumsv_node import electrumsv_node
 from .constants import SERVER_HOST, SERVER_PORT
 from .types import FILTER_RESPONSE_SIZE, filter_response_struct, outpoint_struct, \
     OutpointJSONType, output_spend_struct, OutpointType, RestorationFilterRequest, \
-    tsc_merkle_proof_json_to_binary
+    tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
 
 if TYPE_CHECKING:
     from .server import ApplicationState
@@ -54,9 +54,9 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
                 "baseURL": "/api/v1/merkle-proof",
             },
             {
-                "apiType": "bsvapi.unspent-output",
+                "apiType": "bsvapi.output-spend",
                 "apiVersion": 1,
-                "baseURL": "/api/v1/unspent-output",
+                "baseURL": "/api/v1/output-spend",
             },
             {
                 "apiType": "bsvapi.restoration",
@@ -196,7 +196,6 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
             if include_full_tx:
                 txOrId = rawtx
 
-            target_type: str = ""
             if target_type == 'hash':
                 target = blockhash
             elif target_type == 'header':
@@ -265,10 +264,10 @@ async def post_output_spends(request: web.Request) -> web.Response:
             json_list.append((hash_to_hex_str(row.out_tx_hash), row.out_idx,
                 hash_to_hex_str(row.in_tx_hash), row.in_idx,
                 row.block_hash.hex() if row.block_hash else None))
-        return web.json_response(data=json.dumps(json_list))
+        return web.json_response(data=json_list)
 
 
-async def post_output_spend_notifications(request: web.Request) -> web.Response:
+async def post_output_spend_notifications_register(request: web.Request) -> web.Response:
     """
     Register the caller provided UTXO references so that we send notifications if they get
     spent. We also return the current state for any that are known as a response.
@@ -329,3 +328,44 @@ async def post_output_spend_notifications(request: web.Request) -> web.Response:
                 hash_to_hex_str(row.in_tx_hash), row.in_idx,
                 row.block_hash.hex() if row.block_hash else None))
         return web.json_response(data=json.dumps(json_list))
+
+
+async def post_output_spend_notifications_unregister(request: web.Request) -> web.Response:
+    """
+    This provides a way for the monitored output spends to be unregistered or cleared. It is
+    assumed that whomever has access to this endpoint, has control over the registration and
+    can do this on behalf of all users.
+
+    The reference server manages who is subscribed to what, and what should be monitored, and
+    uses this method to ensure the simple indexer is only monitoring what it needs to.
+
+    If the reference server wishes to clear all monitored output spends, it should send one
+    outpoint and it should be zeroed (null tx hash and zero index).
+    """
+    content_type = request.headers.get('Content-Type')
+    body = await request.content.read()
+    if not body:
+        raise web.HTTPBadRequest(reason="no body")
+
+    client_outpoints: list[OutpointType] = []
+    if content_type == 'application/octet-stream':
+        if len(body) % outpoint_struct.size != 0:
+            raise web.HTTPBadRequest(reason="binary request body malformed")
+
+        for outpoint_index in range(len(body) // outpoint_struct.size):
+            outpoint = cast(OutpointType,
+                outpoint_struct.unpack_from(body, outpoint_index * outpoint_struct.size))
+            client_outpoints.append(outpoint)
+    else:
+        raise web.HTTPBadRequest(reason="unknown request body content type")
+
+    app_state: ApplicationState = request.app['app_state']
+    synchronizer = app_state.blockchain_state_monitor_thread
+    if synchronizer is None:
+        raise web.HTTPInternalServerError(reason="error finding synchronizer")
+
+    if len(client_outpoints) == 1 and client_outpoints[0] == ZEROED_OUTPOINT:
+        synchronizer.clear_output_spend_notifications()
+    else:
+        synchronizer.unregister_output_spend_notifications(client_outpoints)
+    return web.Response()

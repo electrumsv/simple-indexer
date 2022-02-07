@@ -111,9 +111,10 @@ class ApplicationState(object):
                 except queue.Empty:
                     continue
 
-                self.logger.debug(f"Got from ws_queue: message with length {len(message_bytes)}")
+                self.logger.debug("Dispatching outgoing websocket message with length=%d",
+                    len(message_bytes))
                 for ws_client in self.get_ws_clients().values():
-                    # self.logger.debug(f"Sending msg to ws_id: {ws_client.ws_id}")
+                    self.logger.debug("Sending message to websocket, ws_id=%s", ws_client.ws_id)
                     asyncio.run_coroutine_threadsafe(ws_client.websocket.send_bytes(message_bytes),
                         self.loop)
         except Exception:
@@ -138,7 +139,10 @@ def get_aiohttp_app() -> web.Application:
         web.get("/api/v1/transaction/{txid}", handlers.get_transaction),
         web.get("/api/v1/merkle-proof/{txid}", handlers.get_merkle_proof),
         web.post("/api/v1/output-spend", handlers.post_output_spends),
-        web.post("/api/v1/output-spend/notifications", handlers.post_output_spend_notifications),
+        web.post("/api/v1/output-spend/notifications",
+            handlers.post_output_spend_notifications_register),
+        web.post("/api/v1/output-spend/notifications:unregister",
+            handlers.post_output_spend_notifications_unregister),
         web.view("/ws", SimpleIndexerWebSocket), ])
     return app
 

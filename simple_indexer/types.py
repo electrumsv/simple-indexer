@@ -10,6 +10,9 @@ OutpointType = tuple[bytes, int]
 OutpointJSONType = tuple[str, int]
 
 
+ZEROED_OUTPOINT: OutpointType = (bytes(32), 0)
+
+
 class OutputSpendRow(NamedTuple):
     out_tx_hash: bytes
     out_idx: int
@@ -94,7 +97,7 @@ def tsc_merkle_proof_json_to_binary(tsc_json: Dict, include_full_tx: bool, targe
     elif target_type == 'merkleroot':
         flags = flags | TargetType.MERKLE_ROOT
     else:
-        raise NotImplementedError("Caller should have ensured `target_type` is valid.")
+        raise NotImplementedError(f"Invalid target_type value '{target_type}'")
 
     flags = flags | ProofType.MERKLE_BRANCH  # ProofType.MERKLE_TREE not supported
     flags = flags | CompositeProof.SINGLE_PROOF  # CompositeProof.COMPOSITE_PROOF not supported

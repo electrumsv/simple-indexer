@@ -58,7 +58,7 @@ class Synchronizer(threading.Thread):
         self.app_state = app_state
         self.ws_queue = ws_queue
         self.sqlite_db = self.app_state.sqlite_db
-        self.is_ibd = False  # Set to True when initial block download is complete
+        self.completed_initial_download = False  # Set to True when initial block download is complete
 
         self._unspent_output_registrations: set[OutpointType] = set()
 
@@ -197,7 +197,7 @@ class Synchronizer(threading.Thread):
                 outpoint = tx_input.prev_hash, tx_input.prev_idx
                 if outpoint in self._unspent_output_registrations:
                     self._broadcast_spent_output_event(tx_input.prev_hash, tx_input.prev_idx,
-                            tx_hash, in_idx, None)
+                            tx_hash, in_idx, block_hash)
 
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
@@ -238,8 +238,10 @@ class Synchronizer(threading.Thread):
 
     def _broadcast_spent_output_event(self, out_tx_hash: bytes, out_idx: int,
             in_tx_hash: bytes, in_idx: int, block_hash: Optional[bytes]) -> None:
+        self.logger.debug("Broadcasting spent output event for %s:%d",
+            hash_to_hex_str(out_tx_hash), out_idx)
         message_bytes = output_spend_struct.pack(out_tx_hash, out_idx, in_tx_hash, in_idx,
-            block_hash)
+            block_hash if block_hash else bytes(32))
         # We do not provide any kind of message envelope at this time as this is the only
         # kind of message we send.
         self.ws_queue.put(message_bytes, block=False)
@@ -333,9 +335,10 @@ class Synchronizer(threading.Thread):
     def on_new_tip(self, block_hash_new_tip: str):
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
-        new_best_tip: dict = electrumsv_node.call_any('getblockheader', block_hash_new_tip, True).json()['result']
-        self.logger.info(f"New tip received height: {new_best_tip['height']}. "
-                          f"Stored node height: {stored_node_tip.height}")
+        new_best_tip: dict = electrumsv_node.call_any('getblockheader', block_hash_new_tip,
+            True).json()['result']
+        self.logger.info("New tip received height: %d, stored node height: %d",
+            new_best_tip['height'], stored_node_tip.height)
         try:
             self.sync_node_block_headers(to_height=new_best_tip['height'],
                 from_height=new_best_tip['height'])
@@ -344,8 +347,8 @@ class Synchronizer(threading.Thread):
             self.on_reorg(stored_node_tip, new_best_tip['height'])
         finally:
             new_tip = self.app_state.node_headers.longest_chain().tip
-            self.logger.info(f"New best tip height: {new_tip}, "
-                             f"hash: {hash_to_hex_str(new_tip.hash)}")
+            self.logger.info("New best tip height: %s, hash: %s", new_tip,
+                hash_to_hex_str(new_tip.hash))
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
@@ -371,7 +374,7 @@ class Synchronizer(threading.Thread):
         self.logger.info(f"New best tip height: {new_tip.height}, "
             f"hash: {hash_to_hex_str(new_tip.hash)}")
         self.logger.debug("Initial block download complete. Waiting for the next block...")
-        self.is_ibd = True
+        self.completed_initial_download = True
         self.logger.debug("Requesting mempool...")
         mempool_tx_hashes = electrumsv_node.call_any('getrawmempool').json()['result']
         for tx_hash in mempool_tx_hashes:
@@ -453,7 +456,7 @@ class Synchronizer(threading.Thread):
                     if len(msg) == 32:
                         tx_hash = msg.hex()
                         # logger.debug(f"Got {tx_hash} from 'hashtx' sub")
-                        if self.is_ibd:
+                        if self.completed_initial_download:
                             self.on_tx(tx_hash)
                 except zmq.error.Again:
                     continue
@@ -483,3 +486,9 @@ class Synchronizer(threading.Thread):
         # immediately. Otherwise we should send notifications on any open web socket.
         return self.sqlite_db.get_spent_outpoints(outpoints)
 
+    def clear_output_spend_notifications(self) -> None:
+        self._unspent_output_registrations.clear()
+
+    def unregister_output_spend_notifications(self, outpoints: list[OutpointType]) -> None:
+        for outpoint in outpoints:
+            self._unspent_output_registrations.remove(outpoint)
