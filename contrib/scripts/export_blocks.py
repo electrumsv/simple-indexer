@@ -86,7 +86,8 @@ def main() -> None:
 
     # Genesis block plus height amount of additional blocks above it.
     if height+1 != len(headers_bytes)//80:
-        print(f"Blockchain mismatch: height={height+1} does not match headers_count={len(headers_bytes)//80}")
+        print(f"Blockchain mismatch: height={height+1} does not match "
+            f"headers_count={len(headers_bytes)//80}")
         sys.exit(1)
 
     bestblockhash_hex = info["bestblockhash"]
@@ -108,7 +109,8 @@ def main() -> None:
         header_hash_hexs.append(header_hash_hex)
 
     if header_hash_hexs[-1] != bestblockhash_hex:
-        print(f"Tip mismatch, export code is buggy: {header_hash_hexs[-1][:6]} != {bestblockhash_hex[:6]}")
+        print("Tip mismatch, export code is buggy: "
+            f"{header_hash_hexs[-1][:6]} != {bestblockhash_hex[:6]}")
         sys.exit(1)
 
     for i, header_hash_hex in enumerate(header_hash_hexs):

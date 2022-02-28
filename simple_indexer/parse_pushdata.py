@@ -23,18 +23,7 @@ OP_PUSHDATA2 = 0x4D
 OP_PUSHDATA4 = 0x4E
 
 
-def unpack_varint(buf: array.ArrayType, offset: int):
-    n = buf[offset]
-    if n < 253:
-        return n, offset + 1
-    if n == 253:
-        return struct_le_H.unpack_from(buf, offset + 1)[0], offset + 3
-    if n == 254:
-        return struct_le_I.unpack_from(buf, offset + 1)[0], offset + 5
-    return struct_le_Q.unpack_from(buf[offset+1:offset+3].tobytes(), offset + 1)[0], offset + 9
-
-
-def get_pushdata_from_script(script: array.array) -> list[bytes]:
+def get_pushdata_from_script(script: bytes) -> list[bytes]:
     i = 0
     pks, pkhs = set(), set()
     pd_hashes = []
@@ -74,7 +63,7 @@ def get_pushdata_from_script(script: array.array) -> list[bytes]:
                 # This can legitimately happen (bad output scripts...) e.g. see:
                 # ebc9fa1196a59e192352d76c0f6e73167046b9d37b8302b6bb6968dfd279b767
                 # especially on testnet - lots of bad output scripts...
-                logger.error(f"script={script}, len(script)={len(script)}, i={i}")
+                logger.error("script=%s, len(script)=%d, i=%d", script.hex(), len(script), i)
 
         # hash pushdata
         for pk in pks:
@@ -84,6 +73,6 @@ def get_pushdata_from_script(script: array.array) -> list[bytes]:
             pd_hashes.append(sha256(pkh).digest()[0:32])
         return pd_hashes
     except Exception as e:
-        logger.debug(f"script={script}, len(script)={len(script)}, i={i}")
+        logger.debug("script=%s, len(script)=%d, i=%d", script.hex(), len(script), i)
         logger.exception(e)
         raise

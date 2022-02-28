@@ -1,3 +1,4 @@
 bitcoinx
+electrumsv_database>=1.6
+pyzmq
 requests>=2.21.0
-zmq

@@ -11,21 +11,21 @@ import json
 import os
 import requests
 import sys
-from typing import cast, List, TypedDict
+from typing import List, Optional
 
-from bitcoinx import hash_to_hex_str, double_sha256
 
 RPC_URI = "http://rpcuser:rpcpassword@127.0.0.1:18332"
 
 
 def submit_block(block_bytes: bytes) -> None:
     block_bytes_hex = block_bytes.hex()
-    payload = json.dumps({"jsonrpc": "2.0", "method": "submitblock", "params": [ block_bytes_hex ], "id": 0})
+    payload = json.dumps({"jsonrpc": "2.0", "method": "submitblock", "params": [ block_bytes_hex ],
+        "id": 0})
     result = requests.post(f"{RPC_URI}", data=payload, timeout=10.0)
     result.raise_for_status()
 
 
-def import_blocks(output_dir_path: str, to_height: int):
+def import_blocks(output_dir_path: str, to_height: Optional[int]) -> None:
     headers_file_path = os.path.join(output_dir_path, "headers.txt")
     if not os.path.exists(headers_file_path):
         print(f"Directory does not look like a blockchain export: {sys.argv[1]}")
@@ -67,11 +67,11 @@ def main() -> None:
 
     to_height = None
     if len(sys.argv) == 3 and sys.argv[2]:
-        to_height = sys.argv[2]
-        if not to_height.isdigit():
+        to_height_text = sys.argv[2]
+        if not to_height_text.isdigit():
             print(f"to_height optional argument is not a number")
             sys.exit(1)
-        to_height = int(to_height)
+        to_height = int(to_height_text)
 
     import_blocks(output_dir_path, to_height)
 

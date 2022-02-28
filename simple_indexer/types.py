@@ -1,7 +1,6 @@
 import enum
 import struct
-import typing
-from typing import Dict, Optional, NamedTuple, TypedDict
+from typing import Any, cast, Optional, NamedTuple, TypedDict
 
 import bitcoinx
 
@@ -57,7 +56,7 @@ assert struct.calcsize(RESULT_UNPACK_FORMAT) == FILTER_RESPONSE_SIZE
 filter_response_struct = struct.Struct(RESULT_UNPACK_FORMAT)
 
 
-def le_int_to_char(le_int):
+def le_int_to_char(le_int: int) -> bytes:
     return struct.pack('<I', le_int)[0:1]
 
 
@@ -81,8 +80,8 @@ class CompositeProof(enum.IntEnum):
     COMPOSITE_PROOF = 1 << 4
 
 
-def tsc_merkle_proof_json_to_binary(tsc_json: Dict, include_full_tx: bool, target_type: str) \
-        -> bytearray:
+def tsc_merkle_proof_json_to_binary(tsc_json: dict[str, Any], include_full_tx: bool,
+        target_type: str) -> bytearray:
     """{'index': 0, 'txOrId': txOrId, 'target': target, 'nodes': []}"""
     response = bytearray()
 

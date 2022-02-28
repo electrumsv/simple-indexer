@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 import json
 from typing import Any, cast, Dict, Optional, TYPE_CHECKING
 
-import aiohttp
 import requests
 from aiohttp import web
 import logging
@@ -12,13 +11,13 @@ from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
 from .constants import SERVER_HOST, SERVER_PORT
+from . import sqlite_db
 from .types import FILTER_RESPONSE_SIZE, filter_response_struct, outpoint_struct, \
     OutpointJSONType, output_spend_struct, OutpointType, RestorationFilterRequest, \
     tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
 
 if TYPE_CHECKING:
     from .server import ApplicationState
-    from .sqlite_db import SQLiteDatabase
 
 
 logger = logging.getLogger('handlers')
@@ -74,24 +73,27 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
     return web.json_response(data=data)
 
 
-async def get_pushdata_filter_matches(request: web.Request):
+async def get_pushdata_filter_matches(request: web.Request) -> web.StreamResponse:
     """This the main endpoint for the rapid restoration API"""
     app_state: ApplicationState = request.app['app_state']
-    sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
     body = await request.content.read()
     if body:
-        pushdata_hashes: RestorationFilterRequest = json.loads(body.decode('utf-8'))['filterKeys']
+        pushdata_hashes_hex: RestorationFilterRequest = \
+            json.loads(body.decode('utf-8'))['filterKeys']
     else:
         return web.Response(status=400)
 
+    pushdata_hashes = [ bytes.fromhex(value) for value in pushdata_hashes_hex ]
+
     if accept_type == 'application/octet-stream':
         headers = {'Content-Type': 'application/octet-stream', 'User-Agent': 'SimpleIndexer'}
-        response = aiohttp.web.StreamResponse(status=200, reason='OK', headers=headers)
+        response = web.StreamResponse(status=200, reason='OK', headers=headers)
         await response.prepare(request)
 
-        result = sqlite_db.get_pushdata_filter_matches(pushdata_hashes, json=False)
+        result = sqlite_db.get_pushdata_filter_matches(app_state.database_context, pushdata_hashes,
+            json=False)
 
         count = 0
         for match in result:
@@ -103,34 +105,35 @@ async def get_pushdata_filter_matches(request: web.Request):
         logger.debug(f"Total pushdata filter match response size: {total_size} for count: {count}")
     else:
         headers = {'Content-Type': 'application/json', 'User-Agent': 'SimpleIndexer'}
-        response = aiohttp.web.StreamResponse(status=200, reason='OK', headers=headers)
+        response = web.StreamResponse(status=200, reason='OK', headers=headers)
         await response.prepare(request)
 
-        result = sqlite_db.get_pushdata_filter_matches(pushdata_hashes, json=True)
+        result = sqlite_db.get_pushdata_filter_matches(app_state.database_context, pushdata_hashes,
+            json=True)
         for match in result:
-            row = (json.dumps(match) + "\n").encode('utf-8')
-            await response.write(row)
+            data = (json.dumps(match) + "\n").encode('utf-8')
+            await response.write(data)
 
-        finalization_flag = b'\x00'
-        await response.write(finalization_flag)
+        await response.write(b"{}")
     return response
 
 
 async def get_transaction(request: web.Request) -> web.Response:
     app_state: ApplicationState = request.app['app_state']
-    sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
-    try:
-        txid = request.match_info['txid']
-        if not txid:
-            raise ValueError('no txid submitted')
+    tx_id = request.match_info['txid']
+    if not tx_id:
+        return web.Response(status=400, reason="no txid provided")
 
-        rawtx = sqlite_db.get_transaction(hex_str_to_hash(txid))
-        if not rawtx:
-            return web.Response(status=404)
+    try:
+        tx_hash = hex_str_to_hash(tx_id)
     except ValueError:
-        return web.Response(status=400)
+        return web.Response(status=400, reason="invalid txid")
+
+    rawtx = sqlite_db.get_transaction(app_state.database_context, tx_hash)
+    if rawtx is None:
+        return web.Response(status=404)
 
     if accept_type == 'application/octet-stream':
         return web.Response(body=rawtx)
@@ -150,14 +153,18 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
     """
     # Todo - use the bitcoin node as much as possible (this is only for RegTest)
     app_state: ApplicationState = request.app['app_state']
-    sqlite_db: SQLiteDatabase = app_state.sqlite_db
     accept_type = request.headers.get('Accept')
 
     txid = request.match_info['txid']
     if not txid:
         return web.Response(status=400, reason="no txid submitted")
 
-    block_hash = sqlite_db.get_block_hash_for_tx(hex_str_to_hash(txid))
+    try:
+        tx_hash = hex_str_to_hash(txid)
+    except ValueError:
+        return web.Response(status=400, reason="invalid txid")
+
+    block_hash = sqlite_db.get_block_hash_for_tx(app_state.database_context, tx_hash)
     if not block_hash:
         return web.Response(status=404)
 
@@ -249,8 +256,7 @@ async def post_output_spends(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(reason="unknown request body content type")
 
     app_state: ApplicationState = request.app['app_state']
-    sqlite_db: SQLiteDatabase = app_state.sqlite_db
-    existing_rows = sqlite_db.get_spent_outpoints(client_outpoints)
+    existing_rows = sqlite_db.get_spent_outpoints(app_state.database_context, client_outpoints)
 
     if accept_type == 'application/octet-stream':
         result_bytes = b""
@@ -311,7 +317,7 @@ async def post_output_spend_notifications_register(request: web.Request) -> web.
     app_state: ApplicationState = request.app['app_state']
     synchronizer = app_state.blockchain_state_monitor_thread
     if synchronizer is None:
-        raise web.HTTPInternalServerError(reason="error finding synchronizer")
+        raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
     existing_rows = synchronizer.register_output_spend_notifications(client_outpoints)
 
@@ -362,10 +368,106 @@ async def post_output_spend_notifications_unregister(request: web.Request) -> we
     app_state: ApplicationState = request.app['app_state']
     synchronizer = app_state.blockchain_state_monitor_thread
     if synchronizer is None:
-        raise web.HTTPInternalServerError(reason="error finding synchronizer")
+        raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
     if len(client_outpoints) == 1 and client_outpoints[0] == ZEROED_OUTPOINT:
         synchronizer.clear_output_spend_notifications()
     else:
         synchronizer.unregister_output_spend_notifications(client_outpoints)
     return web.Response()
+
+# TODO(1.4.0) Tip filter support.
+# async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
+#     """
+#     Optional endpoint if running an indexer.
+
+#     Used by the client to register pushdata hashes for new/updated transactions so that they can
+#     know about new occurrences of their pushdatas. This should be safe for consecutive calls
+#     even for the same pushdata, as the database unique constraint should raise an integrity
+#     error if there is an ongoing registration.
+#     """
+#     # TODO(1.4.0) This should be monetised with a free quota.
+#     accept_type = request.headers.get('Accept', "application/json")
+#     if accept_type != "application/octet-stream":
+#         raise web.HTTPBadRequest(reason="unknown request body content type")
+
+#     app_state: ApplicationState = request.app['app_state']
+
+#     account_id = request.match_info["account_id"]
+#     # TODO(1.4.0) Need to convert to whatever id format.
+
+#     body = await request.content.read()
+#     if not body:
+#         raise web.HTTPBadRequest(reason="no body")
+
+#     pushdata_hashes: set[bytes] = set()
+#     content_type = request.headers.get("Content-Type")
+#     if content_type == 'application/octet-stream':
+#         if len(body) % 32 != 0:
+#             raise web.HTTPBadRequest(reason="binary request body malformed")
+
+#         for pushdata_index in range(len(body) // 32):
+#             pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
+#     else:
+#         raise web.HTTPBadRequest(reason="unknown request body content type")
+
+#     if not len(pushdata_hashes):
+#         raise web.HTTPBadRequest(reason="no pushdata hashes provided")
+
+#     # It is required that the client knows what it is doing and this is enforced by disallowing
+#     # any registration if any of the given pushdatas are already registered.
+#     if not await app_state.database_context.run_in_thread_async(
+#             create_indexer_filtering_registrations_pushdatas, account_id, list(pushdata_hashes)):
+#         raise web.HTTPBadRequest(reason="some pushdata hashes already registered")
+
+#     # TODO(1.4.0) This should create the registrations and add pushdata that are not already
+#     #     registered to the cuckoo filter.  DB create, then indexer registration.
+
+#     return web.Response(status=200)
+
+
+# async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Response:
+#     """
+#     Optional endpoint if running an indexer.
+
+#     Used by the client to unregister pushdata hashes they are monitoring.
+#     """
+#     # TODO(1.4.0) This should be monetised with a free quota.
+#     accept_type = request.headers.get('Accept', "application/json")
+#     if accept_type not in { "application/json", "application/octet-stream" }:
+#         raise web.HTTPBadRequest(reason="unknown request body content type")
+
+#     app_state: ApplicationState = request.app['app_state']
+
+#     account_id = request.match_info["account_id"]
+#     # TODO(1.4.0) Need to convert to whatever id format.
+
+#     body = await request.content.read()
+#     if not body:
+#         raise web.HTTPBadRequest(reason="no body")
+
+#     pushdata_hashes: set[bytes] = set()
+#     content_type = request.headers.get("Content-Type")
+#     if content_type == 'application/octet-stream':
+#         if len(body) % 32 != 0:
+#             raise web.HTTPBadRequest(reason="binary request body malformed")
+
+#         for pushdata_index in range(len(body) // 32):
+#             pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
+#     else:
+#         raise web.HTTPBadRequest(reason="unknown request body content type")
+
+#     if not len(pushdata_hashes):
+#         raise web.HTTPBadRequest(reason="no pushdata hashes provided")
+
+#     # TODO(1.4.0) This should delete the registrations for the given account and then unregister
+#     #     the pushdatas that are no longer registered by anyone from the shared cuckoo filter.
+
+#     # The indexer applies the deregistrations successfully so we can update our state too.
+#     await app_state.database_context.run_in_thread_async(
+#         delete_indexer_filtering_registrations_pushdatas,
+#         account_id, list(pushdata_hashes), IndexerPushdataRegistrationFlag.FINALISED,
+#         IndexerPushdataRegistrationFlag.FINALISED)
+
+#     return web.Response(status=200)
+

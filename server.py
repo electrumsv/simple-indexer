@@ -32,14 +32,14 @@ FULL_LOG_PATH = MODULE_DIR / 'logs' / 'simple_indexer.log'
 logger = logging.getLogger("server")
 
 
-def create_log_file_if_not_exist():
+def create_log_file_if_not_exist() -> None:
     if not Path(FULL_LOG_PATH).exists():
         os.makedirs(os.path.dirname(FULL_LOG_PATH), exist_ok=True)
         with open(FULL_LOG_PATH, 'w') as f:
             f.write('')
 
 
-def setup_logging():
+def setup_logging() -> None:
     create_log_file_if_not_exist()
     logging.basicConfig(format='%(asctime)s %(levelname)-8s %(name)-24s %(message)s',
         level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
@@ -70,18 +70,18 @@ class AiohttpServer:
 
     async def on_shutdown(self, app: web.Application) -> None:
         self.logger.debug("cleaning up...")
-        self.app.is_alive = False
+        self.app_state.is_alive = False
         self.logger.debug("stopped.")
 
     async def start(self) -> None:
-        self.app.is_alive = True
+        self.app_state.is_alive = True
         self.logger.debug("started on http://%s:%s", self.host, self.port)
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
         site = web.TCPSite(self.runner, self.host, self.port, reuse_address=True)
         await site.start()
         self.app_state.start_threads()
-        while self.app.is_alive:
+        while self.app_state.is_alive:
             await asyncio.sleep(0.5)
 
     async def stop(self) -> None:
@@ -89,7 +89,7 @@ class AiohttpServer:
         await self.runner.cleanup()
 
 
-async def main():
+async def main() -> None:
     setup_logging()
     app = get_aiohttp_app()
     server = AiohttpServer(app)

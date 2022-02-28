@@ -1,7 +1,8 @@
 """
 Procedure for generating reorging chain is as follows:
 - Run the simple indexer and fill the SQLiteDB with blockchain_115_36_3677f4
-- Query the SQLiteDB to extract all non-coinbase txs above height 110 and save them to file (there are 22 of them)
+- Query the SQLiteDB to extract all non-coinbase txs above height 110 and save them to file
+  (there are 22 of them)
 - Reset the node to height zero
 - Take blockchain_115_3677f4 and submit only the first 110 blocks
 (i.e exclude the last 5 with the ElectrumSV test transactions in them)
@@ -14,25 +15,33 @@ import os
 from pathlib import Path
 
 import bitcoinx
+from electrumsv_database.sqlite import DatabaseContext
 from electrumsv_node import electrumsv_node
 from electrumsv_sdk import commands
 
 from contrib.scripts.import_blocks import import_blocks
-from simple_indexer.sqlite_db import SQLiteDatabase
 
-MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-BLOCKCHAIN_PATH = MODULE_DIR.parent / 'blockchains' / 'blockchain_115_3677f4'
+SCRIPT_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
+BLOCKCHAIN_PATH = SCRIPT_PATH.parent / 'blockchains' / 'blockchain_115_3677f4'
 
 os.environ['SIMPLE_INDEX_RESET'] = '0'
 
 
-def extract_relevant_non_coinbase_txs():
-    MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-    sqlitedb = SQLiteDatabase(MODULE_DIR.parent.parent / 'simple_index.db')
-    result = sqlitedb.execute("""
-        SELECT rawtx FROM confirmed_transactions AS ct
+def extract_relevant_non_coinbase_txs() -> None:
+    database_context = DatabaseContext(str(SCRIPT_PATH.parent.parent / 'simple_index.db'))
+    db = database_context.acquire_connection()
+    try:
+        cursor = db.execute("""
+            SELECT rawtx
+            FROM confirmed_transactions AS ct
             JOIN blocks ON ct.block_hash = blocks.block_hash
-            WHERE block_height > 110 ORDER BY block_height ASC;""")
+            WHERE block_height > 110
+            ORDER BY block_height ASC
+        """)
+        result = cursor.fetchall()
+    finally:
+        database_context.release_connection(db)
+    database_context.close()
 
     with open('tx_dump.hex', 'w') as f:
         for row in result:
@@ -41,13 +50,13 @@ def extract_relevant_non_coinbase_txs():
             f.write(rawtx.hex() + "\n")
 
 
-def reset_node():
+def reset_node() -> None:
     commands.stop(component_type='node')
     commands.reset(component_type='node')
     commands.start(component_type='node')
 
 
-def submit_transactions():
+def submit_transactions() -> None:
     non_coinbase_txs = {}
     with open('tx_dump.hex', 'r') as f:
         lines = f.readlines()
@@ -76,7 +85,8 @@ def submit_transactions():
 # NOTE: You must first run simple indexer with blockchain_115_36_3677f4 then run this script
 extract_relevant_non_coinbase_txs()  # From blockchain_115_36_3677f4
 reset_node()
-import_blocks(BLOCKCHAIN_PATH, to_height=110)  # From blockchain_115_36_3677f4 to height 110 of 115
+# From blockchain_115_36_3677f4 to height 110 of 115
+import_blocks(str(BLOCKCHAIN_PATH), to_height=110)
 electrumsv_node.call_any('generate', 5)  # Random 5 blocks
 submit_transactions()  # Same txs from blockchain_115_36_3677f4 will now be mined at height 116
 electrumsv_node.call_any('generate', 1)

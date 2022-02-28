@@ -1,9 +1,10 @@
+from __future__ import annotations
 import io
 import logging
 import queue
 import threading
 import time
-from typing import Optional, TYPE_CHECKING
+from typing import Any, cast, Optional, TYPE_CHECKING
 
 import bitcoinx
 from bitcoinx import hex_str_to_hash, hash_to_hex_str
@@ -14,6 +15,7 @@ import zmq
 from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX, \
     NULL_HASH, GENESIS_HASH
 from .parse_pushdata import get_pushdata_from_script
+from . import sqlite_db
 from .types import OutpointType, output_spend_struct, OutputSpendRow
 from .utils import wait_for_initial_node_startup
 
@@ -52,12 +54,12 @@ class Synchronizer(threading.Thread):
     be at least 1 tx in the "Unprocessed" category for each block.
     """
 
-    def __init__(self, app_state: 'ApplicationState', ws_queue: queue.Queue[bytes]):
+    def __init__(self, app_state: ApplicationState, ws_queue: queue.Queue[bytes]) -> None:
         threading.Thread.__init__(self, daemon=True)
         self.logger = logging.getLogger("blockchain-state-monitor")
         self.app_state = app_state
         self.ws_queue = ws_queue
-        self.sqlite_db = self.app_state.sqlite_db
+        self.database_context = self.app_state.database_context
         self.completed_initial_download = False  # Set to True when initial block download is complete
 
         self._unspent_output_registrations: set[OutpointType] = set()
@@ -79,55 +81,52 @@ class Synchronizer(threading.Thread):
             process_mempool_txs_thread,
         )
 
-    def run(self):
+    def run(self) -> None:
         try:
             for t in self.threads:
                 t.start()
-            while self.app_state.app.is_alive:
+            while self.app_state.is_alive:
                 time.sleep(1)
         except Exception:
             self.logger.exception("unexpected exception in Synchronizer")
         finally:
             self.logger.info("Closing Synchronizer thread")
 
-    def insert_tx_rows(self, block_hash: bytes, txs: list[bitcoinx.Tx]):
-        tx_rows = []
+    def insert_tx_rows(self, block_hash: bytes, txs: list[bitcoinx.Tx]) -> None:
+        tx_rows: list[tuple[bytes, bytes, int, bytes]] = []
         for idx, tx in enumerate(txs):
             tx_hash = tx.hash()
             block_hash = block_hash
             tx_position = idx
             rawtx = tx.to_bytes()
-            tx_row = (tx_hash, block_hash, tx_position, rawtx)
-            tx_rows.append(tx_row)
+            tx_rows.append((tx_hash, block_hash, tx_position, rawtx))
 
-        self.sqlite_db.insert_tx_rows(tx_rows)
+        self.database_context.run_in_thread(sqlite_db.insert_tx_rows, tx_rows)
 
-    def insert_mempool_tx_rows(self, txs: list[bitcoinx.Tx]):
-        tx_rows = []
-        for idx, tx in enumerate(txs):
+    def insert_mempool_tx_rows(self, txs: list[bitcoinx.Tx]) -> None:
+        tx_rows: list[tuple[bytes, float, bytes]] = []
+        for tx in txs:
             mp_tx_hash = tx.hash()
             mp_tx_timestamp = time.time()
             rawtx = tx.to_bytes()
-            tx_row = (mp_tx_hash, mp_tx_timestamp, rawtx)
-            tx_rows.append(tx_row)
+            tx_rows.append((mp_tx_hash, mp_tx_timestamp, rawtx))
 
-        self.sqlite_db.insert_mempool_tx_rows(tx_rows)
+        self.database_context.run_in_thread(sqlite_db.insert_mempool_tx_rows, tx_rows)
 
-    def insert_txo_rows(self, txs: list[bitcoinx.Tx]):
-        output_rows = []
+    def insert_txo_rows(self, txs: list[bitcoinx.Tx]) -> None:
+        output_rows: list[tuple[bytes, int, int, bytes]] = []
         for tx in txs:
             for idx, output in enumerate(tx.outputs):
                 out_tx_hash = tx.hash()
                 out_idx = idx
                 out_value = output.value
                 out_scriptpubkey = output.script_pubkey.to_bytes()
-                output_row = (out_tx_hash, out_idx, out_value, out_scriptpubkey)
-                output_rows.append(output_row)
+                output_rows.append((out_tx_hash, out_idx, out_value, out_scriptpubkey))
 
-        self.sqlite_db.insert_txo_rows(output_rows)
+        self.database_context.run_in_thread(sqlite_db.insert_txo_rows, output_rows)
 
-    def insert_input_rows(self, txs: list[bitcoinx.Tx]):
-        input_rows = []
+    def insert_input_rows(self, txs: list[bitcoinx.Tx]) -> None:
+        input_rows: list[tuple[bytes, int, bytes, int, bytes]] = []
         for tx in txs:
             for idx, input in enumerate(tx.inputs):
                 out_tx_hash = input.prev_hash
@@ -135,13 +134,12 @@ class Synchronizer(threading.Thread):
                 in_tx_hash = tx.hash()
                 in_idx = idx
                 in_scriptsig = input.script_sig.to_bytes()
-                input_row = (out_tx_hash, out_idx, in_tx_hash, in_idx, in_scriptsig)
-                input_rows.append(input_row)
+                input_rows.append((out_tx_hash, out_idx, in_tx_hash, in_idx, in_scriptsig))
 
-        self.sqlite_db.insert_input_rows(input_rows)
+        self.database_context.run_in_thread(sqlite_db.insert_input_rows, input_rows)
 
-    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx]):
-        pushdata_rows = []
+    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx]) -> None:
+        pushdata_rows: list[tuple[bytes, bytes, int, int]] = []
         for tx in txs:
             tx_hash = tx.hash()
             for in_idx, input in enumerate(tx.inputs):
@@ -162,18 +160,18 @@ class Synchronizer(threading.Thread):
                         pushdata_row = (pushdata_hash, tx_hash, out_idx, ref_type)
                         pushdata_rows.append(pushdata_row)
 
-        self.sqlite_db.insert_pushdata_rows(pushdata_rows)
+        self.database_context.run_in_thread(sqlite_db.insert_pushdata_rows, pushdata_rows)
 
     def get_processed_vs_unprocessed_txs(self, txs: list[bitcoinx.Tx]) \
             -> tuple[set[bytes], set[bytes]]:
         """Feed the tx hashes in the block to this SELECT query to see which have already been
         processed via the mempool"""
         tx_hashes = set(tx.hash() for tx in txs)
-        processed_tx_hashes = self.sqlite_db.get_matching_mempool_txids(tx_hashes)
+        processed_tx_hashes = sqlite_db.get_matching_mempool_txids(self.database_context, tx_hashes)
         unprocessed_tx_hashes = tx_hashes - processed_tx_hashes
         return processed_tx_hashes, unprocessed_tx_hashes
 
-    def parse_block(self, block_hash: bytes, rawblock_stream: io.BytesIO):
+    def parse_block(self, block_hash: bytes, rawblock_stream: io.BytesIO) -> None:
         # Todo add a block headers table and insert this there
         # Todo - detect reorg -> if reorg -> handle_reorg()
         raw_header = rawblock_stream.read(80)
@@ -204,7 +202,7 @@ class Synchronizer(threading.Thread):
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
         all_mined_tx_hashes = processed_tx_hashes | unprocessed_txs_hashes
         # self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in all_mined_tx_hashes]}")
-        self.sqlite_db.invalidate_mempool(all_mined_tx_hashes)
+        self.database_context.run_in_thread(sqlite_db.invalidate_mempool, all_mined_tx_hashes)
 
     def on_block(self, new_tip: bitcoinx.Header) -> None:
         block_hash_hex = hash_to_hex_str(new_tip.hash)
@@ -213,9 +211,10 @@ class Synchronizer(threading.Thread):
         rawblock = bytes.fromhex(rawblock_hex)
         rawblock_stream = io.BytesIO(rawblock)
         self.parse_block(new_tip.hash, rawblock_stream)
-        self.sqlite_db.insert_block_row(new_tip.hash, new_tip.height, rawblock)
+        self.database_context.run_in_thread(sqlite_db.insert_block_row, new_tip.hash,
+            new_tip.height, rawblock)
 
-    def on_tx(self, tx_id: str):
+    def on_tx(self, tx_id: str) -> None:
         rawtx = electrumsv_node.call_any('getrawtransaction', tx_id, 1).json()['result']
         tx = bitcoinx.Tx.from_hex(rawtx['hex'])
         is_confirmed = rawtx.get('blockhash', False)
@@ -247,7 +246,7 @@ class Synchronizer(threading.Thread):
         # kind of message we send.
         self.ws_queue.put(message_bytes, block=False)
 
-    def connect_header(self, height: int, raw_header: bytes, headers_store: str):
+    def connect_header(self, height: int, raw_header: bytes, headers_store: str) -> None:
         try:
             if headers_store == 'node':
                 self.app_state.node_headers.connect(raw_header)
@@ -275,14 +274,13 @@ class Synchronizer(threading.Thread):
                 raise
 
     def sync_node_block_headers(self, to_height: int, from_height: int=0,
-            headers_store: str='node'):
-
+            headers_store: str='node') -> None:
         for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
             block_header: str = electrumsv_node.call_any('getblockheader', block_hash, False).json()['result']
             self.connect_header(height, bytes.fromhex(block_header), headers_store=headers_store)
 
-    def backfill_headers(self, to_height: int):
+    def backfill_headers(self, to_height: int) -> None:
         # Just start at genesis and resync all headers (we do not care about performance)
         self.sync_node_block_headers(to_height, from_height=0)
 
@@ -300,13 +298,14 @@ class Synchronizer(threading.Thread):
                 orphaned_chain = chain
 
         if reorg_chain is not None and orphaned_chain is not None:
-            common_chain_and_height = reorg_chain.common_chain_and_height(orphaned_chain)
+            common_chain_and_height = cast(tuple[bitcoinx.Chain, int],
+                reorg_chain.common_chain_and_height(orphaned_chain))
             return common_chain_and_height
         else:
             # Should never happen
             raise ValueError("No common parent block header could be found")
 
-    def on_reorg(self, orphaned_tip: bitcoinx.Header, new_best_tip: int):
+    def on_reorg(self, orphaned_tip: bitcoinx.Header, new_best_tip: int) -> None:
         # Track down any missing node headers and add them to the 'node_headers' store
         count_chains_before = len(self.app_state.node_headers.chains())
         self.backfill_headers(new_best_tip)
@@ -325,7 +324,7 @@ class Synchronizer(threading.Thread):
                 self.on_block(header)
                 self.connect_header(height, header.raw, headers_store='local')
 
-    def sync_blocks(self, from_height=0, to_height=0):
+    def sync_blocks(self, from_height: int=0, to_height: int=0) -> None:
         for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
             header: bitcoinx.Header = \
@@ -333,11 +332,11 @@ class Synchronizer(threading.Thread):
             self.on_block(header)
             self.connect_header(height, header.raw, headers_store='local')
 
-    def on_new_tip(self, block_hash_new_tip: str):
+    def on_new_tip(self, block_hash_new_tip: str) -> None:
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
-        new_best_tip: dict = electrumsv_node.call_any('getblockheader', block_hash_new_tip,
-            True).json()['result']
+        new_best_tip: dict[str, Any] = electrumsv_node.call_any('getblockheader',
+            block_hash_new_tip, True).json()['result']
         self.logger.info("New tip received height: %d, stored node height: %d",
             new_best_tip['height'], stored_node_tip.height)
         try:
@@ -353,9 +352,10 @@ class Synchronizer(threading.Thread):
                 hash_to_hex_str(new_tip.hash))
 
     # Thread -> push to queue
-    # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
-    # To me this is cleaner than a daemon=True thread where the thread dies in an uncontrolled way
-    def maintain_chain_tip_thread(self):
+    # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for
+    # 'app_state.is_alive' To me this is cleaner than a daemon=True thread where the thread dies
+    # in an uncontrolled way
+    def maintain_chain_tip_thread(self) -> None:
         logger = logging.getLogger("maintain-chain-tip-thread")
 
         result = electrumsv_node.call_any('getblockchaininfo').json()['result']
@@ -384,12 +384,14 @@ class Synchronizer(threading.Thread):
 
         self.logger.debug("Listening to node ZMQ...")
         # Wait on zmq pub/sub socket for new tip
-        context: zmq.Context = zmq.Context()
-        work_receiver: zmq.Socket = context.socket(zmq.SUB)
+        # NOTE(typing) No type information for zmq.
+        context: zmq.Context = zmq.Context() # type: ignore[no-untyped-call]
+        # NOTE(typing) No type information for zmq.
+        work_receiver = context.socket(zmq.SUB) # type: ignore[no-untyped-call]
         try:
             work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")
             work_receiver.subscribe(ZMQ_TOPIC_HASH_BLOCK)
-            while self.app_state.app.is_alive:
+            while self.app_state.is_alive:
                 try:
                     if work_receiver.poll(1000, zmq.POLLIN):
                         msg = work_receiver.recv(zmq.NOBLOCK)
@@ -410,16 +412,17 @@ class Synchronizer(threading.Thread):
         finally:
             logger.info("Closing maintain_chain_tip_thread thread")
             work_receiver.close()
-            context.term()
+            # NOTE(typing) No type information for zmq.
+            context.term() # type: ignore[no-untyped-call]
 
-    def poll_node_tip_thread(self):
+    def poll_node_tip_thread(self) -> None:
         """Continually poll the node for chain tip every 5 seconds. This is because ZMQ
         notifications are not received for RegTest blocks with old timestamps so if the node
         only has old timestamp blocks loaded, we can only find out via the RPC API."""
         logger = logging.getLogger("poll-node-tip-thread")
         self._initial_sync_complete.wait()
         logger.info("Starting thread to poll for node tip")
-        while self.app_state.app.is_alive:
+        while self.app_state.is_alive:
             try:
                 result = electrumsv_node.call_any('getblockchaininfo').json()['result']
                 node_tip_height = result['headers']
@@ -438,25 +441,33 @@ class Synchronizer(threading.Thread):
 
 
     # Thread -> push to queue
-    # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for 'app.is_alive'
+    # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for
+    # 'app_state.is_alive'
     # To me this is cleaner than a daemon=True thread where the thread dies in an uncontrolled way
-    def process_new_txs_thread(self):
+    def process_new_txs_thread(self) -> None:
         logger = logging.getLogger("process-new-txs-thread")
-        context: zmq.Context = zmq.Context()
-        work_receiver: zmq.Socket = context.socket(zmq.SUB)
+        # NOTE(typing) No type information for zmq.
+        context: zmq.Context = zmq.Context() # type: ignore[no-untyped-call]
+        # NOTE(typing) No type information for zmq.
+        work_receiver: zmq.Socket = context.socket(zmq.SUB)  # type: ignore[no-untyped-call]
         try:
-            work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")
-            work_receiver.subscribe(ZMQ_TOPIC_HASH_TX)
-            while self.app_state.app.is_alive:
+            # NOTE(typing) No type information for zmq.
+            work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")# type: ignore[no-untyped-call]
+            # NOTE(typing) No type information for zmq.
+            work_receiver.subscribe(ZMQ_TOPIC_HASH_TX) # type: ignore[no-untyped-call]
+            while self.app_state.is_alive:
                 try:
-                    if work_receiver.poll(1000, zmq.POLLIN):
+                    # NOTE(typing) No type information for zmq.
+                    if work_receiver.poll(1000, zmq.POLLIN): # type: ignore[no-untyped-call]
                         msg = work_receiver.recv(zmq.NOBLOCK)
                         # logger.debug(f"Got message {msg}")
                     else:
                         continue
 
-                    if msg == ZMQ_TOPIC_HASH_TX:
+                    # The topic comes as a preceding message to the payload, also ignore frames.
+                    if msg == ZMQ_TOPIC_HASH_TX or not isinstance(msg, bytes):
                         continue
+                    # This is expected to be a "hashtx" payload of a transaction hash.
                     if len(msg) == 32:
                         tx_hash = msg.hex()
                         # logger.debug(f"Got {tx_hash} from 'hashtx' sub")
@@ -468,8 +479,10 @@ class Synchronizer(threading.Thread):
                     logger.exception("unexpected exception in 'zmq_mempool_tx_sub_thread' thread")
         finally:
             logger.info("Closing maintain_chain_tip_thread thread")
-            work_receiver.close()
-            context.term()
+            # NOTE(typing) No type information for zmq.
+            work_receiver.close() # type: ignore[no-untyped-call]
+            # NOTE(typing) No type information for zmq.
+            context.term() # type: ignore[no-untyped-call]
 
     def register_output_spend_notifications(self, outpoints: list[OutpointType]) \
             -> list[OutputSpendRow]:
@@ -488,7 +501,7 @@ class Synchronizer(threading.Thread):
 
         # We need to find out if the outpoints are spent, and where. We can return the results
         # immediately. Otherwise we should send notifications on any open web socket.
-        return self.sqlite_db.get_spent_outpoints(outpoints)
+        return sqlite_db.get_spent_outpoints(self.database_context, outpoints)
 
     def clear_output_spend_notifications(self) -> None:
         self._unspent_output_registrations.clear()

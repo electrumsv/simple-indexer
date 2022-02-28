@@ -1,26 +1,22 @@
-from pathlib import Path
-
-from aiohttp import web
 import asyncio
 import mmap
 import os
 import sys
 import logging
+from pathlib import Path
 import queue
 import threading
 from typing import Dict, Optional
 
-from bitcoinx import (
-    CheckPoint,
-    BitcoinRegtest,
-    Headers,
-)
+from aiohttp import web
+from bitcoinx import BitcoinRegtest, CheckPoint, Headers
+from electrumsv_database.sqlite import DatabaseContext
 
 from .constants import SERVER_HOST, SERVER_PORT
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
+from . import sqlite_db
 from .synchronizer import Synchronizer
-from .sqlite_db import SQLiteDatabase
 
 
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +38,7 @@ CHECKPOINT = CheckPoint(
 
 
 class ApplicationState(object):
+    is_alive: bool = False
 
     def __init__(self, app: web.Application, loop: asyncio.AbstractEventLoop) -> None:
         self.logger = logging.getLogger('app_state')
@@ -59,9 +56,12 @@ class ApplicationState(object):
 
         self.ws_queue: queue.Queue[bytes] = queue.Queue()
         self.blockchain_state_monitor_thread: Optional[Synchronizer] = None
-        self.sqlite_db = SQLiteDatabase(MODULE_DIR.parent / 'simple_index.db')
 
-    def reset_headers_stores(self):
+        datastore_location = MODULE_DIR.parent / 'simple_index.db'
+        self.database_context = DatabaseContext(str(datastore_location), write_warn_ms=10)
+        self.database_context.run_in_thread(sqlite_db.setup)
+
+    def reset_headers_stores(self) -> None:
         if sys.platform == 'win32':
             if os.path.exists(NODE_HEADERS_MMAP_FILEPATH):
                 with open(NODE_HEADERS_MMAP_FILEPATH, 'w+') as f:
@@ -84,7 +84,7 @@ class ApplicationState(object):
             except FileNotFoundError:
                 pass
 
-    def start_threads(self):
+    def start_threads(self) -> None:
         threading.Thread(target=self.push_notifications_thread, daemon=True).start()
 
         self.blockchain_state_monitor_thread = Synchronizer(self, self.ws_queue)
@@ -94,7 +94,7 @@ class ApplicationState(object):
         with self.ws_clients_lock:
             return self.ws_clients
 
-    def add_ws_client(self, ws_client: WSClient):
+    def add_ws_client(self, ws_client: WSClient) -> None:
         with self.ws_clients_lock:
             self.ws_clients[ws_client.ws_id] = ws_client
 
@@ -105,7 +105,7 @@ class ApplicationState(object):
     def push_notifications_thread(self) -> None:
         """Emits any notifications from the queue to all connected websockets"""
         try:
-            while self.app.is_alive:
+            while self.is_alive:
                 try:
                     message_bytes = self.ws_queue.get(timeout=0.5)
                 except queue.Empty:
@@ -134,16 +134,25 @@ def get_aiohttp_app() -> web.Application:
     app.add_routes([
         web.get("/", handlers.ping),
         web.get("/error", handlers.error),
+        web.view("/ws", SimpleIndexerWebSocket),
+
         web.get("/api/v1/endpoints", handlers.get_endpoints_data),
         web.post("/api/v1/restoration/search", handlers.get_pushdata_filter_matches),
         web.get("/api/v1/transaction/{txid}", handlers.get_transaction),
         web.get("/api/v1/merkle-proof/{txid}", handlers.get_merkle_proof),
+
         web.post("/api/v1/output-spend", handlers.post_output_spends),
         web.post("/api/v1/output-spend/notifications",
             handlers.post_output_spend_notifications_register),
         web.post("/api/v1/output-spend/notifications:unregister",
             handlers.post_output_spend_notifications_unregister),
-        web.view("/ws", SimpleIndexerWebSocket), ])
+
+        # TODO(1.4.0) Tip filter support.
+        # web.post("/api/v1/transaction/filter/{account_id}",
+        #     handlers.indexer_post_transaction_filter),
+        # web.post("/api/v1/transaction/filter:delete/{account_id}",
+        #     handlers.indexer_post_transaction_filter_delete),
+    ])
     return app
 
 

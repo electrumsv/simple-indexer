@@ -14,7 +14,7 @@ BITCOIN_NODE_URI = f"http://{BITCOIN_NODE_RPCUSER}:{BITCOIN_NODE_RPCPASSWORD}" \
 logger = logging.getLogger('utils')
 
 
-def wait_for_initial_node_startup(logger):
+def wait_for_initial_node_startup(logger: logging.Logger) -> bool:
     while True:
         try:
             response = electrumsv_node.call_any('getinfo')
