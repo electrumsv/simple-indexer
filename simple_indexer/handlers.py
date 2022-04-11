@@ -76,8 +76,10 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
 
 async def indexer_get_indexer_settings(request: web.Request) -> web.Response:
     app_state: ApplicationState = request.app['app_state']
-    accept_type = request.headers.get('Accept', 'application/json')
-    if accept_type not in ('*/*', 'application/json'):
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
+    if accept_type != "application/json":
         raise web.HTTPBadRequest(reason="invalid 'Accept', expected 'application/json', "
             f"got '{accept_type}'")
 
@@ -136,7 +138,9 @@ async def indexer_post_indexer_settings(request: web.Request) -> web.Response:
 async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
     """This the main endpoint for the rapid restoration API"""
     app_state: ApplicationState = request.app['app_state']
-    accept_type = request.headers.get('Accept')
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
 
     body = await request.content.read()
     if body:
@@ -180,7 +184,9 @@ async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
 
 async def get_transaction(request: web.Request) -> web.Response:
     app_state: ApplicationState = request.app['app_state']
-    accept_type = request.headers.get('Accept')
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
 
     tx_id = request.match_info['txid']
     if not tx_id:
@@ -213,7 +219,9 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
     """
     # Todo - use the bitcoin node as much as possible (this is only for RegTest)
     app_state: ApplicationState = request.app['app_state']
-    accept_type = request.headers.get('Accept')
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
 
     txid = request.match_info['txid']
     if not txid:
@@ -291,8 +299,11 @@ async def post_output_spends(request: web.Request) -> web.Response:
     """
     Return the metadata for each provided outpoint if they are spent.
     """
-    accept_type = request.headers.get('Accept')
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
     content_type = request.headers.get('Content-Type')
+
     body = await request.content.read()
     if not body:
         raise web.HTTPBadRequest(reason="no body")
@@ -344,8 +355,8 @@ async def post_output_spend_notifications_register(request: web.Request) -> web.
     has connected to the notification web socket before making this call, and can keep up
     with the notifications.
     """
-    accept_type = request.headers.get("Accept")
-    if accept_type is None:
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
         accept_type = "application/json"
 
     content_type = request.headers.get("Content-Type")
@@ -457,8 +468,10 @@ async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
     if synchronizer is None:
         raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
-    accept_type = request.headers.get("Accept", "application/json")
-    if accept_type not in ("application/json", "*/*"):
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/json"
+    if accept_type != "application/json":
         raise web.HTTPBadRequest(reason="only json response body supported")
 
     content_type = request.headers.get("Content-Type")
@@ -539,7 +552,9 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
     if synchronizer is None:
         raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
-    accept_type = request.headers.get('Accept', "application/json")
+    accept_type = request.headers.get("Accept", "*/*")
+    if accept_type == "*/*":
+        accept_type = "application/octet-stream"
     if accept_type != "application/octet-stream":
         raise web.HTTPBadRequest(reason="only binary response body supported")
 
