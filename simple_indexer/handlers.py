@@ -12,9 +12,10 @@ from electrumsv_node import electrumsv_node
 
 from .constants import SERVER_HOST, SERVER_PORT
 from . import sqlite_db
-from .types import FILTER_RESPONSE_SIZE, filter_response_struct, outpoint_struct, \
-    OutpointJSONType, output_spend_struct, OutpointType, RestorationFilterRequest, \
-    tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
+from .types import FILTER_RESPONSE_SIZE, filter_response_struct, IndexerPushdataRegistrationFlag, \
+    outpoint_struct, OutpointJSONType, output_spend_struct, OutpointType, \
+    RestorationFilterRequest, tip_filter_entry_struct, TipFilterRegistrationEntry, \
+    TipFilterRegistrationResponse, tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
 
 if TYPE_CHECKING:
     from .server import ApplicationState
@@ -73,7 +74,66 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
     return web.json_response(data=data)
 
 
-async def get_pushdata_filter_matches(request: web.Request) -> web.StreamResponse:
+async def indexer_get_indexer_settings(request: web.Request) -> web.Response:
+    app_state: ApplicationState = request.app['app_state']
+    accept_type = request.headers.get('Accept', 'application/json')
+    if accept_type not in ('*/*', 'application/json'):
+        raise web.HTTPBadRequest(reason="invalid 'Accept', expected 'application/json', "
+            f"got '{accept_type}'")
+
+    account_id_text = request.query.get("account_id")
+    if account_id_text is None:
+        raise web.HTTPBadRequest(reason="missing 'account_id' query parameter")
+    try:
+        external_account_id = int(account_id_text)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="invalid 'account_id' query parameter")
+
+    settings_object = sqlite_db.get_indexer_settings_by_external_id(app_state.database_context,
+        external_account_id)
+    if settings_object is None:
+        # The default values.
+        settings_object = {
+            "tipFilterCallbackUrl": None,
+        }
+    return web.json_response(data=settings_object)
+
+
+async def indexer_post_indexer_settings(request: web.Request) -> web.Response:
+    """
+    This updates all the values that are present, it does not touch those that are not.
+    """
+    app_state: ApplicationState = request.app['app_state']
+
+    content_type = request.headers.get('Content-Type', 'application/json')
+    if content_type != 'application/json':
+        raise web.HTTPBadRequest(reason="invalid 'Content-Type', expected 'application/json', "
+            f"got '{content_type}'")
+
+    accept_type = request.headers.get('Accept', 'application/json')
+    if accept_type not in ('*/*', 'application/json'):
+        raise web.HTTPBadRequest(reason="invalid 'Accept', expected 'application/json', "
+            f"got '{accept_type}'")
+
+    account_id_text = request.query.get("account_id")
+    if account_id_text is None:
+        raise web.HTTPBadRequest(reason="missing 'account_id' query parameter")
+    try:
+        external_account_id = int(account_id_text)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="invalid 'account_id' query parameter")
+
+    settings_update_object =  await request.json()
+    if not isinstance(settings_update_object, dict):
+        raise web.HTTPBadRequest(reason="invalid settings update object in body")
+
+    settings_object = await app_state.database_context.run_in_thread_async(
+        sqlite_db.set_indexer_settings_by_external_id_write, external_account_id,
+            settings_update_object)
+    return web.json_response(data=settings_object)
+
+
+async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
     """This the main endpoint for the rapid restoration API"""
     app_state: ApplicationState = request.app['app_state']
     accept_type = request.headers.get('Accept')
@@ -92,7 +152,7 @@ async def get_pushdata_filter_matches(request: web.Request) -> web.StreamRespons
         response = web.StreamResponse(status=200, reason='OK', headers=headers)
         await response.prepare(request)
 
-        result = sqlite_db.get_pushdata_filter_matches(app_state.database_context, pushdata_hashes,
+        result = sqlite_db.get_restoration_matches(app_state.database_context, pushdata_hashes,
             json=False)
 
         count = 0
@@ -108,7 +168,7 @@ async def get_pushdata_filter_matches(request: web.Request) -> web.StreamRespons
         response = web.StreamResponse(status=200, reason='OK', headers=headers)
         await response.prepare(request)
 
-        result = sqlite_db.get_pushdata_filter_matches(app_state.database_context, pushdata_hashes,
+        result = sqlite_db.get_restoration_matches(app_state.database_context, pushdata_hashes,
             json=True)
         for match in result:
             data = (json.dumps(match) + "\n").encode('utf-8')
@@ -206,7 +266,8 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
             if target_type == 'hash':
                 target = blockhash
             elif target_type == 'header':
-                target = electrumsv_node.call_any("getblockheader", blockhash, False).json()['result']
+                target = electrumsv_node.call_any("getblockheader", blockhash,
+                    False).json()['result']
             elif target_type == 'merkleroot':
                 target = merkleroot
             else:
@@ -283,8 +344,11 @@ async def post_output_spend_notifications_register(request: web.Request) -> web.
     has connected to the notification web socket before making this call, and can keep up
     with the notifications.
     """
-    accept_type = request.headers.get('Accept')
-    content_type = request.headers.get('Content-Type')
+    accept_type = request.headers.get("Accept")
+    if accept_type is None:
+        accept_type = "application/json"
+
+    content_type = request.headers.get("Content-Type")
     body = await request.content.read()
     if not body:
         raise web.HTTPBadRequest(reason="no body")
@@ -376,98 +440,161 @@ async def post_output_spend_notifications_unregister(request: web.Request) -> we
         synchronizer.unregister_output_spend_notifications(client_outpoints)
     return web.Response()
 
-# TODO(1.4.0) Tip filter support.
-# async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
-#     """
-#     Optional endpoint if running an indexer.
 
-#     Used by the client to register pushdata hashes for new/updated transactions so that they can
-#     know about new occurrences of their pushdatas. This should be safe for consecutive calls
-#     even for the same pushdata, as the database unique constraint should raise an integrity
-#     error if there is an ongoing registration.
-#     """
-#     # TODO(1.4.0) This should be monetised with a free quota.
-#     accept_type = request.headers.get('Accept', "application/json")
-#     if accept_type != "application/octet-stream":
-#         raise web.HTTPBadRequest(reason="unknown request body content type")
+async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
+    """
+    Optional endpoint if running an indexer.
 
-#     app_state: ApplicationState = request.app['app_state']
+    Used by the client to register pushdata hashes for new/updated transactions so that they can
+    know about new occurrences of their pushdatas. This should be safe for consecutive calls
+    even for the same pushdata, as the database unique constraint should raise an integrity
+    error if there is an ongoing registration.
+    """
+    # TODO(1.4.0) Payment. This should be monetised with a free quota.
+    app_state: ApplicationState = request.app['app_state']
 
-#     account_id = request.match_info["account_id"]
-#     # TODO(1.4.0) Need to convert to whatever id format.
+    synchronizer = app_state.blockchain_state_monitor_thread
+    if synchronizer is None:
+        raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
-#     body = await request.content.read()
-#     if not body:
-#         raise web.HTTPBadRequest(reason="no body")
+    accept_type = request.headers.get("Accept", "application/json")
+    if accept_type not in ("application/json", "*/*"):
+        raise web.HTTPBadRequest(reason="only json response body supported")
 
-#     pushdata_hashes: set[bytes] = set()
-#     content_type = request.headers.get("Content-Type")
-#     if content_type == 'application/octet-stream':
-#         if len(body) % 32 != 0:
-#             raise web.HTTPBadRequest(reason="binary request body malformed")
+    content_type = request.headers.get("Content-Type")
+    if content_type not in ("application/octet-stream", "*/*"):
+        raise web.HTTPBadRequest(reason="only binary request body supported")
 
-#         for pushdata_index in range(len(body) // 32):
-#             pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
-#     else:
-#         raise web.HTTPBadRequest(reason="unknown request body content type")
+    try:
+        account_id_text = request.query.get("account_id", "")
+        external_account_id = int(account_id_text)
+    except (KeyError, ValueError):
+        raise web.HTTPBadRequest(reason="`account_id` is not a number")
 
-#     if not len(pushdata_hashes):
-#         raise web.HTTPBadRequest(reason="no pushdata hashes provided")
+    try:
+        date_created_text = request.query.get("date_created", "")
+        date_created = int(date_created_text)
+    except (KeyError, ValueError):
+        raise web.HTTPBadRequest(reason="`date_created` is not a number")
 
-#     # It is required that the client knows what it is doing and this is enforced by disallowing
-#     # any registration if any of the given pushdatas are already registered.
-#     if not await app_state.database_context.run_in_thread_async(
-#             create_indexer_filtering_registrations_pushdatas, account_id, list(pushdata_hashes)):
-#         raise web.HTTPBadRequest(reason="some pushdata hashes already registered")
+    body = await request.content.read()
+    if not body:
+        raise web.HTTPBadRequest(reason="no body")
 
-#     # TODO(1.4.0) This should create the registrations and add pushdata that are not already
-#     #     registered to the cuckoo filter.  DB create, then indexer registration.
+    if len(body) % tip_filter_entry_struct.size != 0:
+        raise web.HTTPBadRequest(reason="binary request body malformed")
 
-#     return web.Response(status=200)
+    # Currently we only allow registrations between five minutes and seven days.
+    minimum_seconds = 5 * 60
+    maximum_seconds = 7 * 24 * 60 * 60
+    registration_entries = list[TipFilterRegistrationEntry]()
+    for entry_index in range(len(body) // tip_filter_entry_struct.size):
+        entry = TipFilterRegistrationEntry(*tip_filter_entry_struct.unpack_from(body,
+            entry_index * tip_filter_entry_struct.size))
+        if entry.duration_seconds < minimum_seconds:
+            raise web.HTTPBadRequest(
+                reason=f"An entry has a duration of {entry.duration_seconds} which is lower than "
+                    f"the minimum value {minimum_seconds}")
+        if entry.duration_seconds > maximum_seconds:
+            raise web.HTTPBadRequest(
+                reason=f"An entry has a duration of {entry.duration_seconds} which is higher than "
+                    f"the maximum value {maximum_seconds}")
+        registration_entries.append(entry)
+
+    logger.debug("Adding tip filter entries to database %s", registration_entries)
+    # It is required that the client knows what it is doing and this is enforced by disallowing
+    # these registrations if any of the given pushdatas are already registered.
+    account_id = sqlite_db.read_account_id_for_external_account_id(app_state.database_context,
+        external_account_id)
+    if not await app_state.database_context.run_in_thread_async(
+            sqlite_db.create_indexer_filtering_registrations_pushdatas, account_id,
+            date_created, registration_entries):
+        raise web.HTTPBadRequest(reason="one or more hashes were already registered")
+
+    logger.debug("Registering tip filter entries with synchroniser")
+    # This can be registering hashes that other accounts have already registered, that is fine
+    # as long as the registrations match the unregistrations.
+    synchronizer.register_tip_filter_pushdatas(date_created, registration_entries)
+
+    # Convert the timestamps to ISO 8601 time string. The posix timestamp is fine but we want to
+    # default the public-facing API to JSON-developer level formats. We bundle it as an "object"
+    # so that we can put additional things in there.
+    date_created_text = datetime.utcfromtimestamp(date_created).isoformat()
+    json_lump: TipFilterRegistrationResponse = {
+        "dateCreated": date_created_text,
+    }
+    return web.json_response(data=json_lump)
 
 
-# async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Response:
-#     """
-#     Optional endpoint if running an indexer.
+async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Response:
+    """
+    Optional endpoint if running an indexer.
 
-#     Used by the client to unregister pushdata hashes they are monitoring.
-#     """
-#     # TODO(1.4.0) This should be monetised with a free quota.
-#     accept_type = request.headers.get('Accept', "application/json")
-#     if accept_type not in { "application/json", "application/octet-stream" }:
-#         raise web.HTTPBadRequest(reason="unknown request body content type")
+    Used by the client to unregister pushdata hashes they are monitoring.
+    """
+    # TODO(1.4.0) Payment. This should be monetised with a free quota.
+    app_state: ApplicationState = request.app['app_state']
 
-#     app_state: ApplicationState = request.app['app_state']
+    synchronizer = app_state.blockchain_state_monitor_thread
+    if synchronizer is None:
+        raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
-#     account_id = request.match_info["account_id"]
-#     # TODO(1.4.0) Need to convert to whatever id format.
+    accept_type = request.headers.get('Accept', "application/json")
+    if accept_type != "application/octet-stream":
+        raise web.HTTPBadRequest(reason="only binary response body supported")
 
-#     body = await request.content.read()
-#     if not body:
-#         raise web.HTTPBadRequest(reason="no body")
+    content_type = request.headers.get("Content-Type")
+    if content_type != 'application/octet-stream':
+        raise web.HTTPBadRequest(reason="only binary request body supported")
 
-#     pushdata_hashes: set[bytes] = set()
-#     content_type = request.headers.get("Content-Type")
-#     if content_type == 'application/octet-stream':
-#         if len(body) % 32 != 0:
-#             raise web.HTTPBadRequest(reason="binary request body malformed")
+    try:
+        account_id_text = request.query.get("account_id", "")
+        external_account_id = int(account_id_text)
+    except (KeyError, ValueError):
+        raise web.HTTPBadRequest(reason="`account_id` is not a number")
 
-#         for pushdata_index in range(len(body) // 32):
-#             pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
-#     else:
-#         raise web.HTTPBadRequest(reason="unknown request body content type")
+    body = await request.content.read()
+    if not body:
+        raise web.HTTPBadRequest(reason="no body")
+    if len(body) % 32 != 0:
+        raise web.HTTPBadRequest(reason="binary request body malformed")
 
-#     if not len(pushdata_hashes):
-#         raise web.HTTPBadRequest(reason="no pushdata hashes provided")
+    pushdata_hashes: set[bytes] = set()
+    for pushdata_index in range(len(body) // 32):
+        pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
+    if not len(pushdata_hashes):
+        raise web.HTTPBadRequest(reason="no pushdata hashes provided")
 
-#     # TODO(1.4.0) This should delete the registrations for the given account and then unregister
-#     #     the pushdatas that are no longer registered by anyone from the shared cuckoo filter.
+    pushdata_hash_list = list(pushdata_hashes)
 
-#     # The indexer applies the deregistrations successfully so we can update our state too.
-#     await app_state.database_context.run_in_thread_async(
-#         delete_indexer_filtering_registrations_pushdatas,
-#         account_id, list(pushdata_hashes), IndexerPushdataRegistrationFlag.FINALISED,
-#         IndexerPushdataRegistrationFlag.FINALISED)
+    # This is required to update all the given pushdata filtering registration from finalised
+    # (and not being deleted by any other concurrent task) to finalised and being deleted. If
+    # any of the registrations are not in this state, it is assumed that the client application
+    # is broken and mismanaging it's own state.
+    account_id = sqlite_db.read_account_id_for_external_account_id(app_state.database_context,
+        external_account_id)
+    try:
+        await app_state.database_context.run_in_thread_async(
+            sqlite_db.update_indexer_filtering_registrations_pushdatas_flags,
+            account_id, pushdata_hash_list,
+            update_flags=IndexerPushdataRegistrationFlag.DELETING,
+            filter_flags=IndexerPushdataRegistrationFlag.FINALISED,
+            filter_mask=IndexerPushdataRegistrationFlag.MASK_FINALISED_DELETING_CLEAR,
+            require_all=True)
+    except sqlite_db.DatabaseStateModifiedError:
+        raise web.HTTPBadRequest(reason="some pushdata hashes are not registered")
 
-#     return web.Response(status=200)
+    # It is essential that these registrations are in place either from a call during the current
+    # run or read from the database on load, and that we are removing those registrations. If
+    # entries not present get unregistered, this can corrupt the filter. If entries present get
+    # unregistered but do not belong to this account, this will corrupt the filter.
+    try:
+        synchronizer.unregister_tip_filter_pushdatas(pushdata_hash_list)
+    finally:
+        await app_state.database_context.run_in_thread_async(
+            sqlite_db.delete_indexer_filtering_registrations_pushdatas,
+            account_id, pushdata_hash_list, IndexerPushdataRegistrationFlag.FINALISED,
+            IndexerPushdataRegistrationFlag.FINALISED)
+
+    return web.Response(status=200)
 

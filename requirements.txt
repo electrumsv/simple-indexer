@@ -1,4 +1,5 @@
 bitcoinx
+refcuckoo>=1.0
 electrumsv_database>=1.6
 pyzmq
 requests>=2.21.0

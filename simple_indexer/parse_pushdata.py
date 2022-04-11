@@ -1,10 +1,7 @@
-import array
 import logging
 import struct
 from hashlib import sha256
 from struct import Struct
-
-from bitcoinx.packing import struct_le_Q, struct_le_H, struct_le_I
 
 logger = logging.getLogger('utils')
 

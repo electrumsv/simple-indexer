@@ -8,19 +8,27 @@ from typing import Any, cast, Optional, TYPE_CHECKING
 
 import bitcoinx
 from bitcoinx import hex_str_to_hash, hash_to_hex_str
+import refcuckoo
 from electrumsv_node import electrumsv_node
 import requests
 import zmq
 
-from .constants import ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX, \
-    NULL_HASH, GENESIS_HASH
+from .constants import GENESIS_HASH, NULL_HASH, ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, \
+    ZMQ_TOPIC_HASH_TX
 from .parse_pushdata import get_pushdata_from_script
 from . import sqlite_db
-from .types import OutpointType, output_spend_struct, OutputSpendRow
+from .types import CuckooResult, IndexerPushdataRegistrationFlag, output_spend_struct, \
+    OutputSpendRow, OutpointType, PushDataRow, TipFilterRegistrationEntry
 from .utils import wait_for_initial_node_startup
 
 if TYPE_CHECKING:
     from .server import ApplicationState
+
+
+class RegtestLimitationError(Exception):
+    pass
+
+
 
 
 class Synchronizer(threading.Thread):
@@ -60,9 +68,26 @@ class Synchronizer(threading.Thread):
         self.app_state = app_state
         self.ws_queue = ws_queue
         self.database_context = self.app_state.database_context
-        self.completed_initial_download = False  # Set to True when initial block download is complete
+        # Set to True when initial block download is complete
+        self.completed_initial_download = False
 
         self._unspent_output_registrations: set[OutpointType] = set()
+
+        # Populate the shared cuckoo filter with all existing registrations. Remember that the
+        # filter handles duplicate registrations, and it is a lot easier to just register them
+        # and unregister them for every account, than try and manage duplicates.
+        # Note that at the time of writing the bits per item is 12 (compiled into `refcuckoo`).
+        self._common_cuckoo = refcuckoo.CuckooFilter(500000)
+        self._filter_expiry_next_time = int(time.time()) + 30
+        registration_entries = sqlite_db.read_indexer_filtering_registrations_pushdatas(
+            self.database_context,
+            mask=IndexerPushdataRegistrationFlag.DELETING|IndexerPushdataRegistrationFlag.FINALISED,
+            expected_flags=IndexerPushdataRegistrationFlag.FINALISED)
+        for registration_entry in registration_entries:
+            # TODO(1.4.0) Tip filter. Expiry dates should be tracked and entries removed.
+            self._common_cuckoo.add(registration_entry.pushdata_hash)
+        self.logger.debug("Populated the common cuckoo filter with %d entries",
+            len(registration_entries))
 
         wait_for_initial_node_startup(self.logger)
         # NOTE: These are NOT daemon threads so must take care that all of them shutdown gracefully
@@ -75,10 +100,13 @@ class Synchronizer(threading.Thread):
         maintain_chain_tip_thread = threading.Thread(target=self.maintain_chain_tip_thread)
         poll_node_thread = threading.Thread(target=self.poll_node_tip_thread)
         process_mempool_txs_thread = threading.Thread(target=self.process_new_txs_thread)
+        common_cuckoo_filter_expiry_thread = threading.Thread(
+            target=self._common_cuckoo_filter_expiry_thread)
         self.threads = (
             maintain_chain_tip_thread,
             poll_node_thread,
             process_mempool_txs_thread,
+            common_cuckoo_filter_expiry_thread,
         )
 
     def run(self) -> None:
@@ -90,7 +118,7 @@ class Synchronizer(threading.Thread):
         except Exception:
             self.logger.exception("unexpected exception in Synchronizer")
         finally:
-            self.logger.info("Closing Synchronizer thread")
+            self.logger.info("Exiting synchronizer thread")
 
     def insert_tx_rows(self, block_hash: bytes, txs: list[bitcoinx.Tx]) -> None:
         tx_rows: list[tuple[bytes, bytes, int, bytes]] = []
@@ -138,8 +166,9 @@ class Synchronizer(threading.Thread):
 
         self.database_context.run_in_thread(sqlite_db.insert_input_rows, input_rows)
 
-    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx]) -> None:
-        pushdata_rows: list[tuple[bytes, bytes, int, int]] = []
+    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx],
+            filter_matches: list[PushDataRow]) -> None:
+        pushdata_rows: list[PushDataRow] = []
         for tx in txs:
             tx_hash = tx.hash()
             for in_idx, input in enumerate(tx.inputs):
@@ -148,7 +177,7 @@ class Synchronizer(threading.Thread):
                 if input_pushdatas:
                     for pushdata_hash in input_pushdatas:
                         ref_type = 1  # An input
-                        pushdata_row = (pushdata_hash, tx_hash, in_idx, ref_type)
+                        pushdata_row = PushDataRow(pushdata_hash, tx_hash, in_idx, ref_type)
                         pushdata_rows.append(pushdata_row)
 
             for out_idx, output in enumerate(tx.outputs):
@@ -157,10 +186,14 @@ class Synchronizer(threading.Thread):
                 if output_pushdatas:
                     for pushdata_hash in output_pushdatas:
                         ref_type = 0  # An output
-                        pushdata_row = (pushdata_hash, tx_hash, out_idx, ref_type)
+                        pushdata_row = PushDataRow(pushdata_hash, tx_hash, out_idx, ref_type)
                         pushdata_rows.append(pushdata_row)
 
         self.database_context.run_in_thread(sqlite_db.insert_pushdata_rows, pushdata_rows)
+
+        for pushdata_row in pushdata_rows:
+            if self._common_cuckoo.contains(pushdata_row.pushdata_hash) == CuckooResult.OK:
+                filter_matches.append(pushdata_row)
 
     def get_processed_vs_unprocessed_txs(self, txs: list[bitcoinx.Tx]) \
             -> tuple[set[bytes], set[bytes]]:
@@ -184,12 +217,14 @@ class Synchronizer(threading.Thread):
         processed_tx_hashes, unprocessed_txs_hashes = self.get_processed_vs_unprocessed_txs(txs)
 
         self.insert_tx_rows(block_hash, txs)
+
+        filter_matches: list[PushDataRow] = []
         for tx in txs:
             tx_hash = tx.hash()
             if tx_hash in unprocessed_txs_hashes:
                 self.insert_txo_rows([tx])
                 self.insert_input_rows([tx])
-                self.insert_pushdata_rows([tx])
+                self.insert_pushdata_rows([tx], filter_matches)
 
             # Dispatch any spent output notifications.
             for in_idx, tx_input in enumerate(tx.inputs):
@@ -201,8 +236,12 @@ class Synchronizer(threading.Thread):
         # Todo - atomically invalidate mempool +
         #  update local indexer tip (in both headers.mmap + app_state.local_tip attribute)
         all_mined_tx_hashes = processed_tx_hashes | unprocessed_txs_hashes
-        # self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in all_mined_tx_hashes]}")
+        # self.logger.debug(f"Invalidating tx_hashes: {[hash_to_hex_str(x) for x in
+        #     all_mined_tx_hashes]}")
         self.database_context.run_in_thread(sqlite_db.invalidate_mempool, all_mined_tx_hashes)
+
+        if len(filter_matches):
+            self.app_state.dispatch_tip_filter_notifications(filter_matches, block_hash)
 
     def on_block(self, new_tip: bitcoinx.Header) -> None:
         block_hash_hex = hash_to_hex_str(new_tip.hash)
@@ -220,19 +259,29 @@ class Synchronizer(threading.Thread):
         is_confirmed = rawtx.get('blockhash', False)
         is_mempool = not is_confirmed
         if is_mempool:
+            filter_matches: list[PushDataRow] = []
+
             # There is no batch-wise processing because we don't care about performance
-            self.logger.debug(f"Got mempool tx_hash: {tx_id}")
-            self.insert_mempool_tx_rows([tx])
+            self.logger.debug("Processing mempool tx id: %s", tx_id)
+            try:
+                self.insert_mempool_tx_rows([tx])
+            except sqlite_db.DatabaseInsertConflict:
+                self.logger.debug("Mempool transaction already present id: %s", tx_id)
+                return
             self.insert_txo_rows([tx])
             self.insert_input_rows([tx])
-            self.insert_pushdata_rows([tx])
+            self.insert_pushdata_rows([tx], filter_matches)
 
+            # TODO(1.4.0) Concurrency. There is no reason for this to block the synchronizer.
             tx_hash = hex_str_to_hash(tx_id)
             for in_idx, tx_input in enumerate(tx.inputs):
                 outpoint = tx_input.prev_hash, tx_input.prev_idx
                 if outpoint in self._unspent_output_registrations:
                     self._broadcast_spent_output_event(tx_input.prev_hash, tx_input.prev_idx,
                             tx_hash, in_idx, None)
+
+            if len(filter_matches):
+                self.app_state.dispatch_tip_filter_notifications(filter_matches, None)
         else:
             pass
 
@@ -277,7 +326,8 @@ class Synchronizer(threading.Thread):
             headers_store: str='node') -> None:
         for height in range(from_height, to_height + 1):
             block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
-            block_header: str = electrumsv_node.call_any('getblockheader', block_hash, False).json()['result']
+            block_header: str = electrumsv_node.call_any('getblockheader', block_hash,
+                False).json()['result']
             self.connect_header(height, bytes.fromhex(block_header), headers_store=headers_store)
 
     def backfill_headers(self, to_height: int) -> None:
@@ -315,12 +365,14 @@ class Synchronizer(threading.Thread):
             chain, common_parent_height = self.find_common_parent(reorg_new_tip, orphaned_tip)
 
             depth = reorg_new_tip.height - common_parent_height - 1
-            self.logger.debug(f"Reorg detected of depth: {depth}. Syncing blocks from parent height: "
-                              f"{common_parent_height} to {reorg_new_tip.height}")
+            self.logger.debug(
+                f"Reorg detected of depth: {depth}. Syncing blocks from parent height: "
+                f"{common_parent_height} to {reorg_new_tip.height}")
 
             for height in range(common_parent_height, new_best_tip + 1):
                 block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
-                header: bitcoinx.Header = self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
+                header: bitcoinx.Header = self.app_state.node_headers.lookup(
+                    hex_str_to_hash(block_hash))[0]
                 self.on_block(header)
                 self.connect_header(height, header.raw, headers_store='local')
 
@@ -343,7 +395,8 @@ class Synchronizer(threading.Thread):
             if new_best_tip['height'] > self.app_state.local_headers.longest_chain().height:
                 self.sync_node_block_headers(to_height=new_best_tip['height'],
                     from_height=new_best_tip['height'])
-                self.sync_blocks(from_height=new_best_tip['height'], to_height=new_best_tip['height'])
+                self.sync_blocks(from_height=new_best_tip['height'],
+                    to_height=new_best_tip['height'])
         except bitcoinx.MissingHeader:
             self.on_reorg(stored_node_tip, new_best_tip['height'])
         finally:
@@ -478,11 +531,34 @@ class Synchronizer(threading.Thread):
                 except Exception:
                     logger.exception("unexpected exception in 'zmq_mempool_tx_sub_thread' thread")
         finally:
-            logger.info("Closing maintain_chain_tip_thread thread")
+            logger.info("Closing process_new_txs thread")
             # NOTE(typing) No type information for zmq.
             work_receiver.close() # type: ignore[no-untyped-call]
             # NOTE(typing) No type information for zmq.
             context.term() # type: ignore[no-untyped-call]
+
+    def _common_cuckoo_filter_expiry_thread(self) -> None:
+        """
+        This batch deletes expired common cuckoo filter entries currently every thirty seconds.
+        """
+        while self.app_state.is_alive:
+            wait_seconds = min(self._filter_expiry_next_time - int(time.time()), 30)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            if int(time.time()) < self._filter_expiry_next_time:
+                continue
+
+            pushdata_hashes = self.database_context.run_in_thread(
+                sqlite_db.expire_indexer_filtering_registrations_pushdatas,
+                    self._filter_expiry_next_time)
+            if len(pushdata_hashes):
+                for pushdata_hash in pushdata_hashes:
+                    removal_result = self._common_cuckoo.remove(pushdata_hash)
+                    if removal_result != CuckooResult.OK:
+                        self.logger.error("Filter hash expiry/removal error %d", removal_result)
+                self.logger.debug("Filter hash expiry/removal removed %d entries",
+                    len(pushdata_hashes))
+            self._filter_expiry_next_time += 30
 
     def register_output_spend_notifications(self, outpoints: list[OutpointType]) \
             -> list[OutputSpendRow]:
@@ -495,7 +571,9 @@ class Synchronizer(threading.Thread):
         #   reorgs are no longer possible. But this is the simple indexer, it is enough to note
         #   this flaw and move on.
         # - The sole consumer of this API is the reference server, and it can track what where
-        #   to pass notifications for these events.
+        #   to pass notifications for these events. This differs from tip filtering registrations
+        #   which have per-user notifications via peer channels, where the indexer needs to know
+        #   who registered what to notify them.
         for outpoint in outpoints:
             self._unspent_output_registrations.add(outpoint)
 
@@ -509,3 +587,47 @@ class Synchronizer(threading.Thread):
     def unregister_output_spend_notifications(self, outpoints: list[OutpointType]) -> None:
         for outpoint in outpoints:
             self._unspent_output_registrations.remove(outpoint)
+
+    def register_tip_filter_pushdatas(self, date_created: int,
+            registration_entries: list[TipFilterRegistrationEntry]) -> None:
+        """
+        This adds in the hashes to the common cuckoo filter. The caller must have filtered out
+        duplicate registrations, and only the first registration for this pushdata filter should
+        ever be added.
+
+        A difference between these and output spend notifications is that the indexer needs to
+        know which user registered these, in order to do peer channel notifications.
+        """
+        for i, entry in enumerate(registration_entries):
+            result = self._common_cuckoo.add(entry.pushdata_hash)
+            if result == CuckooResult.OK:
+                continue
+
+            # Something was wrong, so we remove all the entries we just added as a bad batch.
+            for entry in registration_entries[:i+1]:
+                removal_result = self._common_cuckoo.remove(entry.pushdata_hash)
+                if removal_result != CuckooResult.OK:
+                    self.logger.error("Hash removal on filter error errored %d", removal_result)
+
+            if result == CuckooResult.NOT_ENOUGH_SPACE:
+                # A production implementation should recreate the filter with a higher number of
+                # maximum entries (the next power of two). We are going to just raise an error and
+                # obviously error because of it. First we will remove the hashes we added, but
+                # really who cares as this error should be considered extreme corruption.
+                raise RegtestLimitationError("Cuckoo filter addition encountered fullness")
+            else:
+                raise RegtestLimitationError(f"Cuckoo filter addition encountered error {result}")
+
+    def unregister_tip_filter_pushdatas(self, pushdata_hashes: list[bytes]) -> None:
+        """
+        This removes the hashes from the common cuckoo filter. The caller must have filtered out
+        all hashes other than those whose final instance was just unregistered. It must not remove
+        hashes that do not exist, or multiple times.
+        """
+        for pushdata_hash in pushdata_hashes:
+            result = self._common_cuckoo.remove(pushdata_hash)
+            if result != CuckooResult.OK:
+                # This is not necessarily the wrong response to this event, but encountering it
+                # should be an emergency for production indexer implementations.
+                self.logger.error("Unexpected hash removal '%s' with result %d",
+                    pushdata_hash.hex(), result)

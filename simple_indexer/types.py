@@ -1,6 +1,6 @@
 import enum
 import struct
-from typing import Any, cast, Optional, NamedTuple, TypedDict
+from typing import Any, Optional, NamedTuple, TypedDict
 
 import bitcoinx
 
@@ -54,6 +54,25 @@ FILTER_RESPONSE_SIZE = 1 + 32 + 32 + 4 + 32 + 4
 assert struct.calcsize(RESULT_UNPACK_FORMAT) == FILTER_RESPONSE_SIZE
 
 filter_response_struct = struct.Struct(RESULT_UNPACK_FORMAT)
+
+
+class IndexerPushdataRegistrationFlag(enum.IntFlag):
+    NONE                            = 0
+    FINALISED                       = 1 << 0
+    DELETING                        = 1 << 1
+
+    MASK_ALL = ~NONE
+    MASK_DELETING_CLEAR             = ~DELETING
+    MASK_FINALISED_CLEAR            = ~FINALISED
+    MASK_FINALISED_DELETING_CLEAR   = ~(FINALISED | DELETING)
+
+
+
+class PushDataRow(NamedTuple):
+    pushdata_hash: bytes
+    tx_hash: bytes
+    idx: int
+    ref_type: int
 
 
 def le_int_to_char(le_int: int) -> bytes:
@@ -127,3 +146,28 @@ def tsc_merkle_proof_json_to_binary(tsc_json: dict[str, Any], include_full_tx: b
             response += hash_type_node
             response += bitcoinx.hex_str_to_hash(node)
     return response
+
+
+class CuckooResult(enum.IntEnum):
+    OK = 0
+    NOT_FOUND = 1
+    NOT_ENOUGH_SPACE = 2
+    NOT_SUPPORTED = 3
+
+
+class TipFilterRegistrationResponse(TypedDict):
+    dateCreated: str
+
+
+TIP_FILTER_ENTRY_FORMAT = ">32sI"
+tip_filter_entry_struct = struct.Struct(TIP_FILTER_ENTRY_FORMAT)
+
+class TipFilterRegistrationEntry(NamedTuple):
+    pushdata_hash: bytes
+    duration_seconds: int
+
+
+class AccountMetadata(NamedTuple):
+    account_id: int
+    tip_filter_callback_url: Optional[str]
+    tip_filter_callback_token: Optional[str]
