@@ -2,25 +2,29 @@ import aiohttp
 import asyncio
 import concurrent.futures
 from http import HTTPStatus
+import json
+import logging
 import mmap
 import os
-import sys
-import logging
 from pathlib import Path
 import queue
+import sys
 import threading
+import time
 from typing import Dict, Optional, TypeVar
 
 from aiohttp import web
 from bitcoinx import BitcoinRegtest, CheckPoint, hash_to_hex_str, Headers
 from electrumsv_database.sqlite import DatabaseContext
 
-from .constants import SERVER_HOST, SERVER_PORT
+from .constants import OutboundDataFlag, REFERENCE_SERVER_HOST, REFERENCE_SERVER_PORT, \
+    REFERENCE_SERVER_SCHEME, SERVER_HOST, SERVER_PORT
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
 from . import handlers
 from . import sqlite_db
 from .synchronizer import Synchronizer
-from .types import PushDataRow
+from .types import OutboundDataRow, PushDataRow, TipFilterNotificationBatch, \
+    TipFilterNotificationEntry
 
 
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +48,11 @@ CHECKPOINT = CheckPoint(
 
 T2 = TypeVar("T2")
 
+
+def asyncio_future_callback(future: asyncio.Task[None]) -> None:
+    if future.cancelled():
+        return
+    future.result()
 
 def future_callback(future: concurrent.futures.Future[None]) -> None:
     if future.cancelled():
@@ -71,9 +80,29 @@ class ApplicationState(object):
         self.ws_queue: queue.Queue[bytes] = queue.Queue()
         self.blockchain_state_monitor_thread: Optional[Synchronizer] = None
 
+        scheme = os.getenv("REFERENCE_SERVER_SCHEME", REFERENCE_SERVER_SCHEME)
+        host = os.getenv("REFERENCE_SERVER_HOST", REFERENCE_SERVER_HOST)
+        port = os.getenv("REFERENCE_SERVER_PORT", REFERENCE_SERVER_PORT)
+        self.reference_server_url = f"{scheme}://{host}:{port}"
+
         datastore_location = MODULE_DIR.parent / 'simple_index.db'
         self.database_context = DatabaseContext(str(datastore_location), write_warn_ms=10)
         self.database_context.run_in_thread(sqlite_db.setup)
+
+        self._outbound_data_delivery_event = asyncio.Event()
+
+    async def setup_async(self) -> None:
+        self.is_alive = True
+        self.aiohttp_session = aiohttp.ClientSession()
+        self._outbound_data_delivery_future = asyncio.ensure_future(
+            asyncio.create_task(self._attempt_outbound_data_delivery_task()))
+        # Futures swallow exceptions so we must install a callback that raises them.
+        self._outbound_data_delivery_future.add_done_callback(asyncio_future_callback)
+
+    async def teardown_async(self) -> None:
+        self.is_alive = False
+        self._outbound_data_delivery_future.cancel()
+        await self.aiohttp_session.close()
 
     def reset_headers_stores(self) -> None:
         if sys.platform == 'win32':
@@ -112,6 +141,10 @@ class ApplicationState(object):
         with self.ws_clients_lock:
             self.ws_clients[ws_client.ws_id] = ws_client
 
+        # The reference server is reconnected pre-emptively allow immediate redelivery.
+        self._outbound_data_delivery_event.set()
+        self._outbound_data_delivery_event.clear()
+
     def remove_ws_client_by_id(self, ws_id: str) -> None:
         with self.ws_clients_lock:
             del self.ws_clients[ws_id]
@@ -138,10 +171,70 @@ class ApplicationState(object):
         finally:
             self.logger.info("Exiting push notifications thread")
 
+    async def _attempt_outbound_data_delivery_task(self) -> None:
+        """
+        Non-blocking delivery of new tip filter notifications.
+        """
+        self.logger.debug("Starting outbound data delivery task")
+        MAXIMUM_DELAY = 120.0
+        while self.is_alive:
+            # No point in trying if there is no reference server connected.
+            next_check_delay = MAXIMUM_DELAY
+            if len(self.get_ws_clients()) > 0:
+                rows = sqlite_db.read_pending_outbound_datas(self.database_context,
+                    OutboundDataFlag.NONE, OutboundDataFlag.DISPATCHED_SUCCESSFULLY)
+                current_rows = list[OutboundDataRow]()
+                if len(rows) > 0:
+                    current_time = time.time()
+                    for row in rows:
+                        if row.date_last_tried + MAXIMUM_DELAY > current_time:
+                            next_check_delay = (row.date_last_tried + MAXIMUM_DELAY) \
+                                - current_time + 0.5
+                            break
+                        current_rows.append(row)
+
+                self.logger.debug("Outbound data delivery of %d entries, next delay will be %0.2f",
+                    len(current_rows), next_check_delay)
+                delivery_updates = list[tuple[OutboundDataFlag, int, int]]()
+                for row in current_rows:
+                    assert row.outbound_data_id is not None
+                    url = self.reference_server_url +"/api/v1/tip-filter/matches"
+                    headers = {
+                        "Content-Type":     "application/json",
+                    }
+                    batch_text = row.outbound_data.decode("utf-8")
+                    updated_flags = row.outbound_data_flags
+                    try:
+                        async with self.aiohttp_session.post(url, headers=headers,
+                                data=batch_text) as response:
+                            if response.status == HTTPStatus.OK:
+                                self.logger.debug("Posted outbound data to reference server "+
+                                    "status=%s, reason=%s", response.status, response.reason)
+                                updated_flags |= OutboundDataFlag.DISPATCHED_SUCCESSFULLY
+                            else:
+                                self.logger.error("Failed to post outbound data to reference "+
+                                    "server status=%s, reason=%s", response.status, response.reason)
+                    except aiohttp.ClientError:
+                        self.logger.exception("Failed to post outbound data to reference server")
+
+                    delivery_updates.append((updated_flags, int(time.time()), row.outbound_data_id))
+
+                if len(delivery_updates) > 0:
+                    self.database_context.run_in_thread(
+                        sqlite_db.update_outbound_data_last_tried_write, delivery_updates)
+            else:
+                self.logger.debug("Outbound data delivery deferred due to lack of reference "
+                    "server connection")
+
+            try:
+                await asyncio.wait_for(self._outbound_data_delivery_event.wait(), next_check_delay)
+            except asyncio.TimeoutError:
+                pass
+
     def dispatch_tip_filter_notifications(self, matches: list[PushDataRow],
             block_hash: Optional[bytes]) -> None:
         """
-        Non-blocking delivery of tip filter notifications.
+        Non-blocking delivery of new tip filter notifications.
         """
         self.logger.debug("Starting task for dispatching tip filter notifications (%d)",
             len(matches))
@@ -152,6 +245,9 @@ class ApplicationState(object):
 
     async def dispatch_tip_filter_notifications_async(self, matches: list[PushDataRow],
             block_hash: Optional[bytes]) -> None:
+        """
+        Worker task for delivery of new tip filter notifications.
+        """
         self.logger.debug("Entered task for dispatching tip filter notifications")
         matches_by_hash = dict[bytes, list[PushDataRow]]()
         for match in matches:
@@ -185,47 +281,60 @@ class ApplicationState(object):
         # TODO(1.4.0) Servers. Consider moving the callback metadata and the notifications made to
         #     it to the reference server. It can queue the results if they were not able to be
         #     delivered.
-        metadata_by_account_id = { row[0]: row for row
+        metadata_by_account_id = { row.account_id: row for row
             in sqlite_db.read_account_metadata(self.database_context, list(matches_by_account_id)) }
         block_id = hash_to_hex_str(block_hash) if block_hash is not None else None
-        async with aiohttp.ClientSession() as session:
-            for account_id, matched_rows in matches_by_account_id.items():
-                if account_id not in metadata_by_account_id:
-                    self.logger.error("Account does not have peer channel callback set, "
-                        "account_id: %d for hashes: %s", account_id,
-                        [ pdh.pushdata_hash.hex() for pdh in matched_rows ])
-                    continue
 
-                account_metadata = metadata_by_account_id[account_id]
-                self.logger.debug("Posting matches for peer channel account %s", account_metadata)
-                assert account_metadata.tip_filter_callback_url is not None
-                assert account_metadata.tip_filter_callback_token is not None
-                headers = {
-                    "Content-Type":     "application/json",
-                    "Authorization":    f"Bearer {account_metadata.tip_filter_callback_token}"
-                }
-                request_data = {
-                    "blockId": block_id,
-                    "matches": [
-                        {
-                            "pushDataHashHex": matched_row.pushdata_hash.hex(),
-                            "transactionId": hash_to_hex_str(matched_row.tx_hash),
-                            "transactionIndex": matched_row.idx,
-                            "flags": sqlite_db.get_pushdata_match_flag(matched_row.ref_type),
-                        } for matched_row in matched_rows
-                    ]
-                }
-                try:
-                    async with session.post(account_metadata.tip_filter_callback_url,
-                            headers=headers, json=request_data) as response:
-                        if response.status != HTTPStatus.OK:
-                            self.logger.error("Failed to post peer channel response "+
-                                "status=%s, reason=%s", response.status, response.reason)
-                            continue
-                        self.logger.debug("Posted message to peer channel "+
-                            "status=%s, reason=%s", response.status, response.reason)
-                except aiohttp.ClientError:
-                    self.logger.exception("Failed to post peer channel response")
+        entries = list[TipFilterNotificationEntry]()
+        for account_id, matched_rows in matches_by_account_id.items():
+            if account_id not in metadata_by_account_id:
+                self.logger.error("Account does not have peer channel callback set, "
+                    "account_id: %d for hashes: %s", account_id,
+                    [ pdh.pushdata_hash.hex() for pdh in matched_rows ])
+                continue
+
+            account_metadata = metadata_by_account_id[account_id]
+            self.logger.debug("Posting matches for peer channel account %s", account_metadata)
+            request_data: TipFilterNotificationEntry = {
+                "accountId": account_metadata.external_account_id,
+                "matches": [
+                    {
+                        "pushDataHashHex": matched_row.pushdata_hash.hex(),
+                        "transactionId": hash_to_hex_str(matched_row.tx_hash),
+                        "transactionIndex": matched_row.idx,
+                        "flags": sqlite_db.get_pushdata_match_flag(matched_row.ref_type),
+                    } for matched_row in matched_rows
+                ]
+            }
+            entries.append(request_data)
+
+        batch: TipFilterNotificationBatch = {
+            "blockId": block_id,
+            "entries": entries,
+        }
+
+        url = self.reference_server_url +"/api/v1/tip-filter/matches"
+        headers = {
+            "Content-Type":     "application/json",
+        }
+        try:
+            async with self.aiohttp_session.post(url, headers=headers, json=batch) as response:
+                if response.status == HTTPStatus.OK:
+                    self.logger.debug("Posted outbound data to reference server "+
+                        "status=%s, reason=%s", response.status, response.reason)
+                    return
+
+                self.logger.error("Failed to post outbound data to reference server "+
+                    "status=%s, reason=%s", response.status, response.reason)
+        except aiohttp.ClientError:
+            self.logger.exception("Failed to post outbound data to reference server")
+
+        batch_json = json.dumps(batch)
+        date_created = int(time.time())
+        creation_row = OutboundDataRow(None, batch_json.encode(),
+            OutboundDataFlag.TIP_FILTER_NOTIFICATIONS, date_created, date_created)
+        self.database_context.run_in_thread(sqlite_db.create_outbound_data_write, creation_row)
+
 
 # def handle_asyncio_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
 #     exception = context.get("exception")
@@ -250,9 +359,6 @@ def get_aiohttp_app() -> web.Application:
         web.view("/ws", SimpleIndexerWebSocket),
 
         web.get("/api/v1/endpoints", handlers.get_endpoints_data),
-
-        web.get("/api/v1/indexer", handlers.indexer_get_indexer_settings),
-        web.post("/api/v1/indexer", handlers.indexer_post_indexer_settings),
 
         # These need to be registered before "/transaction/{txid}" to avoid clashes.
         web.post("/api/v1/transaction/filter", handlers.indexer_post_transaction_filter),

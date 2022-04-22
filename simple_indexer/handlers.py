@@ -74,67 +74,6 @@ async def get_endpoints_data(request: web.Request) -> web.Response:
     return web.json_response(data=data)
 
 
-async def indexer_get_indexer_settings(request: web.Request) -> web.Response:
-    app_state: ApplicationState = request.app['app_state']
-    accept_type = request.headers.get("Accept", "*/*")
-    if accept_type == "*/*":
-        accept_type = "application/json"
-    if accept_type != "application/json":
-        raise web.HTTPBadRequest(reason="invalid 'Accept', expected 'application/json', "
-            f"got '{accept_type}'")
-
-    account_id_text = request.query.get("account_id")
-    if account_id_text is None:
-        raise web.HTTPBadRequest(reason="missing 'account_id' query parameter")
-    try:
-        external_account_id = int(account_id_text)
-    except ValueError:
-        raise web.HTTPBadRequest(reason="invalid 'account_id' query parameter")
-
-    settings_object = sqlite_db.get_indexer_settings_by_external_id(app_state.database_context,
-        external_account_id)
-    if settings_object is None:
-        # The default values.
-        settings_object = {
-            "tipFilterCallbackUrl": None,
-        }
-    return web.json_response(data=settings_object)
-
-
-async def indexer_post_indexer_settings(request: web.Request) -> web.Response:
-    """
-    This updates all the values that are present, it does not touch those that are not.
-    """
-    app_state: ApplicationState = request.app['app_state']
-
-    content_type = request.headers.get('Content-Type', 'application/json')
-    if content_type != 'application/json':
-        raise web.HTTPBadRequest(reason="invalid 'Content-Type', expected 'application/json', "
-            f"got '{content_type}'")
-
-    accept_type = request.headers.get('Accept', 'application/json')
-    if accept_type not in ('*/*', 'application/json'):
-        raise web.HTTPBadRequest(reason="invalid 'Accept', expected 'application/json', "
-            f"got '{accept_type}'")
-
-    account_id_text = request.query.get("account_id")
-    if account_id_text is None:
-        raise web.HTTPBadRequest(reason="missing 'account_id' query parameter")
-    try:
-        external_account_id = int(account_id_text)
-    except ValueError:
-        raise web.HTTPBadRequest(reason="invalid 'account_id' query parameter")
-
-    settings_update_object =  await request.json()
-    if not isinstance(settings_update_object, dict):
-        raise web.HTTPBadRequest(reason="invalid settings update object in body")
-
-    settings_object = await app_state.database_context.run_in_thread_async(
-        sqlite_db.set_indexer_settings_by_external_id_write, external_account_id,
-            settings_update_object)
-    return web.json_response(data=settings_object)
-
-
 async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
     """This the main endpoint for the rapid restoration API"""
     app_state: ApplicationState = request.app['app_state']
@@ -517,10 +456,8 @@ async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
     logger.debug("Adding tip filter entries to database %s", registration_entries)
     # It is required that the client knows what it is doing and this is enforced by disallowing
     # these registrations if any of the given pushdatas are already registered.
-    account_id = sqlite_db.read_account_id_for_external_account_id(app_state.database_context,
-        external_account_id)
     if not await app_state.database_context.run_in_thread_async(
-            sqlite_db.create_indexer_filtering_registrations_pushdatas, account_id,
+            sqlite_db.create_indexer_filtering_registrations_pushdatas_write, external_account_id,
             date_created, registration_entries):
         raise web.HTTPBadRequest(reason="one or more hashes were already registered")
 
@@ -586,12 +523,10 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
     # (and not being deleted by any other concurrent task) to finalised and being deleted. If
     # any of the registrations are not in this state, it is assumed that the client application
     # is broken and mismanaging it's own state.
-    account_id = sqlite_db.read_account_id_for_external_account_id(app_state.database_context,
-        external_account_id)
     try:
         await app_state.database_context.run_in_thread_async(
-            sqlite_db.update_indexer_filtering_registrations_pushdatas_flags,
-            account_id, pushdata_hash_list,
+            sqlite_db.update_indexer_filtering_registrations_pushdatas_flags_write,
+            external_account_id, pushdata_hash_list,
             update_flags=IndexerPushdataRegistrationFlag.DELETING,
             filter_flags=IndexerPushdataRegistrationFlag.FINALISED,
             filter_mask=IndexerPushdataRegistrationFlag.MASK_FINALISED_DELETING_CLEAR,
@@ -607,8 +542,8 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
         synchronizer.unregister_tip_filter_pushdatas(pushdata_hash_list)
     finally:
         await app_state.database_context.run_in_thread_async(
-            sqlite_db.delete_indexer_filtering_registrations_pushdatas,
-            account_id, pushdata_hash_list, IndexerPushdataRegistrationFlag.FINALISED,
+            sqlite_db.delete_indexer_filtering_registrations_pushdatas_write,
+            external_account_id, pushdata_hash_list, IndexerPushdataRegistrationFlag.FINALISED,
             IndexerPushdataRegistrationFlag.FINALISED)
 
     return web.Response(status=200)

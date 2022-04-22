@@ -66,11 +66,12 @@ class AiohttpServer:
 
     async def on_startup(self, app: web.Application) -> None:
         self.logger.debug("starting...")
+        await self.app_state.setup_async()
         self.logger.debug(f"file logging path={FULL_LOG_PATH}")
 
     async def on_shutdown(self, app: web.Application) -> None:
         self.logger.debug("cleaning up...")
-        self.app_state.is_alive = False
+        await self.app_state.teardown_async()
         self.logger.debug("stopped.")
 
     async def start(self) -> None:

@@ -31,9 +31,10 @@ from bitcoinx import hash_to_hex_str
 from electrumsv_database.sqlite import read_rows_by_id, read_rows_by_ids, \
     replace_db_context_with_connection
 
-from .constants import MAX_UINT32
-from .types import AccountMetadata, IndexerPushdataRegistrationFlag, OutpointType, OutputSpendRow, \
-    PushDataRow, RestorationFilterJSONResponse, RestorationFilterResult, TipFilterRegistrationEntry
+from .constants import AccountFlag, MAX_UINT32, OutboundDataFlag
+from .types import AccountMetadata, IndexerPushdataRegistrationFlag, OutboundDataRow, \
+    OutpointType, OutputSpendRow, PushDataRow, RestorationFilterJSONResponse, \
+    RestorationFilterResult, TipFilterRegistrationEntry
 
 
 logger = logging.getLogger("sqlite-database")
@@ -67,6 +68,7 @@ def create_tables(db: sqlite3.Connection) -> None:
     create_pushdata_table(db)
     create_blocks_table(db)
     create_tip_filter_registrations_table(db)
+    create_outbound_data_table(db)
 
 def drop_tables(db: sqlite3.Connection) -> None:
     logger.debug("dropping database tables")
@@ -78,6 +80,7 @@ def drop_tables(db: sqlite3.Connection) -> None:
     drop_mempool_tx_table(db)
     drop_raw_blocks_table(db)
     drop_tip_filter_registrations_table(db)
+    drop_outbound_data_table(db)
 
 
 def create_blocks_table(db: sqlite3.Connection) -> None:
@@ -175,13 +178,11 @@ def create_accounts_table(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS accounts (
         account_id                  INTEGER     PRIMARY KEY,
         external_account_id         INTEGER     NOT NULL,
-        tip_filter_callback_url     TEXT        NULL,
-        tip_filter_callback_token   TEXT        NULL,
         account_flags               INTEGER     NOT NULL
     )
     """)
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_external_id_idx "
-        "ON accounts (account_id, external_account_id)")
+        "ON accounts (external_account_id)")
 
 def drop_accounts_table(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE IF EXISTS accounts")
@@ -202,6 +203,20 @@ def create_tip_filter_registrations_table(db: sqlite3.Connection) -> None:
 
 def drop_tip_filter_registrations_table(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE IF EXISTS tip_filter_registrations")
+
+def create_outbound_data_table(db: sqlite3.Connection) -> None:
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS outbound_data (
+        outbound_data_id        INTEGER     PRIMARY KEY,
+        outbound_data           BLOB        NOT NULL,
+        outbound_data_flags     INTEGER     NOT NULL,
+        date_created            INTEGER     NOT NULL,
+        date_last_tried         INTEGER     NOT NULL
+    )
+    """)
+
+def drop_outbound_data_table(db: sqlite3.Connection) -> None:
+    db.execute("DROP TABLE IF EXISTS outbound_data")
 
 # ----- Database operations ----- #
 def insert_tx_rows(tx_rows: list[tuple[bytes, bytes, int, bytes]],
@@ -318,6 +333,39 @@ def insert_block_row(block_hash: bytes, height: int, raw_block: bytes,
     db.execute("INSERT INTO blocks VALUES (?, ?, ?)", (block_hash, height, raw_block))
 
 
+def create_account_write(external_account_id: int, db: Optional[sqlite3.Connection]=None) -> int:
+    """
+    This does partial updates depending on what is in `settings`.
+    """
+    sql_values: tuple[Any, ...]
+    assert db is not None and isinstance(db, sqlite3.Connection)
+    row = db.execute("SELECT account_id FROM accounts WHERE external_account_id=?",
+        (external_account_id,)).fetchone()
+    if row is not None:
+        return cast(int, row[0])
+
+    sql = """
+    INSERT INTO accounts (external_account_id, account_flags)
+    VALUES (?, ?)
+    RETURNING account_id
+    """
+    sql_values = (external_account_id, AccountFlag.NONE)
+    row = db.execute(sql, sql_values).fetchone()
+    logger.debug("Created account in indexer settings db callback %d", row[0])
+    return cast(int, row[0])
+
+
+@replace_db_context_with_connection
+def read_account_metadata(db: sqlite3.Connection, account_ids: list[int]) \
+        -> list[AccountMetadata]:
+    sql = """
+        SELECT account_id, external_account_id, account_flags
+        FROM accounts
+        WHERE account_id IN ({})
+    """
+    return read_rows_by_id(AccountMetadata, db, sql, [], account_ids)
+
+
 @replace_db_context_with_connection
 def read_account_id_for_external_account_id(db: sqlite3.Connection, external_account_id: int) \
         -> int:
@@ -325,59 +373,6 @@ def read_account_id_for_external_account_id(db: sqlite3.Connection, external_acc
         (external_account_id,)).fetchone()
     assert row is not None
     return cast(int, row[0])
-
-
-@replace_db_context_with_connection
-def read_account_metadata(db: sqlite3.Connection, account_ids: list[int]) \
-        -> list[AccountMetadata]:
-    sql = "SELECT account_id, tip_filter_callback_url, tip_filter_callback_token " \
-        "FROM accounts WHERE account_id IN ({})"
-    return read_rows_by_id(AccountMetadata, db, sql, [], account_ids)
-
-
-@replace_db_context_with_connection
-def get_indexer_settings_by_external_id(db: sqlite3.Connection,
-        external_account_id: int) -> Optional[dict[str, Any]]:
-    row = db.execute("SELECT tip_filter_callback_url, tip_filter_callback_token "
-        "FROM accounts WHERE external_account_id=?", (external_account_id,)).fetchone()
-    if row is None:
-        return None
-    # All existing settings should be added to the "settings object" we return.
-    return {
-        "tipFilterCallbackUrl": row[0],
-        "tipFilterCallbackToken": row[1],
-    }
-
-
-def set_indexer_settings_by_external_id_write(external_account_id: int, settings: dict[str, Any],
-        db: Optional[sqlite3.Connection]=None) -> dict[str, Any]:
-    """
-    This does partial updates depending on what is in `settings`.
-    """
-    sql_values: tuple[Any, ...]
-    assert db is not None and isinstance(db, sqlite3.Connection)
-    new_tip_filter_callback_url: Optional[str] = settings.get("tipFilterCallbackUrl", None)
-    new_tip_filter_callback_token: Optional[str] = settings.get("tipFilterCallbackToken", None)
-    row = db.execute("SELECT account_id FROM accounts WHERE external_account_id=?",
-        (external_account_id,)).fetchone()
-    if row is None:
-        sql_values = (None, external_account_id, new_tip_filter_callback_url,
-            new_tip_filter_callback_token, 0)
-        cursor = db.execute("INSERT INTO accounts (account_id, external_account_id, "
-            "tip_filter_callback_url, tip_filter_callback_token, account_flags) "
-            "VALUES (?, ?, ?, ?, ?) RETURNING account_id", sql_values)
-        logger.debug("Created account in indexer settings db callback %s", cursor.fetchone())
-    else:
-        account_id = row[0]
-        cursor = db.execute("UPDATE accounts SET tip_filter_callback_url=?, "
-            "tip_filter_callback_token=? WHERE account_id=?",
-            (new_tip_filter_callback_url, new_tip_filter_callback_token, account_id))
-        assert cursor.rowcount == 1
-    # All existing settings should be added to the "settings object" we return.
-    return {
-        "tipFilterCallbackUrl": new_tip_filter_callback_url,
-        "tipFilterCallbackToken": new_tip_filter_callback_token,
-    }
 
 
 def get_pushdata_match_flag(ref_type: int) -> int:
@@ -451,10 +446,13 @@ def get_spent_outpoints(db: sqlite3.Connection, entries: list[OutpointType]) \
     return read_rows_by_ids(OutputSpendRow, db, sql, sql_condition, [], entries)
 
 
-def create_indexer_filtering_registrations_pushdatas(account_id: int, date_created: int,
-        registration_entries: list[TipFilterRegistrationEntry],
+def create_indexer_filtering_registrations_pushdatas_write(external_account_id: int,
+        date_created: int, registration_entries: list[TipFilterRegistrationEntry],
         db: Optional[sqlite3.Connection]=None) -> bool:
     assert db is not None and isinstance(db, sqlite3.Connection)
+
+    account_id = create_account_write(external_account_id, db)
+
     # We use the SQLite `OR ABORT` clause to ensure we either insert all registrations or none
     # if some are already present. This means we do not need to rely on rolling back the
     # transaction because no changes should have been made in event of conflict.
@@ -523,14 +521,17 @@ def read_indexer_filtering_registrations_for_notifications(db: sqlite3.Connectio
     return read_rows_by_id(FilterNotificationRow, db, sql, sql_values, pushdata_hashes)
 
 
-def update_indexer_filtering_registrations_pushdatas_flags(
-        account_id: int, pushdata_hashes: list[bytes],
+def update_indexer_filtering_registrations_pushdatas_flags_write(
+        external_account_id: int, pushdata_hashes: list[bytes],
         update_flags: IndexerPushdataRegistrationFlag=IndexerPushdataRegistrationFlag.NONE,
         update_mask: Optional[IndexerPushdataRegistrationFlag]=None,
         filter_flags: IndexerPushdataRegistrationFlag=IndexerPushdataRegistrationFlag.NONE,
         filter_mask: Optional[IndexerPushdataRegistrationFlag]=None,
         require_all: bool=False, db: Optional[sqlite3.Connection]=None) -> None:
     assert db is not None and isinstance(db, sqlite3.Connection)
+
+    account_id = create_account_write(external_account_id, db)
+
     # Ensure that the update only affects the update flags if no mask is provided.
     final_update_mask = ~update_flags if update_mask is None else update_mask
     # Ensure that the filter only looks at the filter flags if no mask is provided.
@@ -569,13 +570,16 @@ def expire_indexer_filtering_registrations_pushdatas(date_expires: int,
     return [ cast(bytes, row[0]) for row in db.execute(sql_deletion, sql_values).fetchall() ]
 
 
-def delete_indexer_filtering_registrations_pushdatas(account_id: int,
+def delete_indexer_filtering_registrations_pushdatas_write(external_account_id: int,
         pushdata_hashes: list[bytes],
         # These defaults include all rows no matter the existing flag value.
         expected_flags: IndexerPushdataRegistrationFlag=IndexerPushdataRegistrationFlag.NONE,
         mask: IndexerPushdataRegistrationFlag=IndexerPushdataRegistrationFlag.NONE,
         db: Optional[sqlite3.Connection]=None) -> None:
     assert db is not None and isinstance(db, sqlite3.Connection)
+
+    account_id = create_account_write(external_account_id, db)
+
     sql = """
     DELETE FROM indexer_filtering_registrations_pushdata
     WHERE account_id=? AND pushdata_hash=? AND flags&?=?
@@ -584,3 +588,35 @@ def delete_indexer_filtering_registrations_pushdatas(account_id: int,
     for pushdata_value in pushdata_hashes:
         update_rows.append((account_id, pushdata_value, mask, expected_flags))
     db.executemany(sql, update_rows)
+
+
+def create_outbound_data_write(creation_row: OutboundDataRow,
+        db: Optional[sqlite3.Connection]=None) -> int:
+    assert db is not None and isinstance(db, sqlite3.Connection)
+    sql = "INSERT INTO outbound_data (outbound_data_id, outbound_data, outbound_data_flags, " \
+        "date_created, date_last_tried) VALUES (?, ?, ?, ?, ?) RETURNING outbound_data_id"
+    result_row = db.execute(sql, creation_row).fetchone()
+    if result_row is None:
+        raise DatabaseInsertConflict()
+    return cast(int, result_row[0])
+
+
+@replace_db_context_with_connection
+def read_pending_outbound_datas(db: sqlite3.Connection, flags: OutboundDataFlag,
+        mask: OutboundDataFlag) -> list[OutboundDataRow]:
+    sql = "SELECT outbound_data_id, outbound_data, outbound_data_flags, date_created, " \
+        "date_last_tried FROM outbound_data WHERE (outbound_data_flags&?)=? " \
+        "ORDER BY date_last_tried ASC"
+    sql_values = (mask, flags)
+    return [ OutboundDataRow(row[0], row[1], OutboundDataFlag(row[2]), row[3], row[4])
+        for row in db.execute(sql, sql_values) ]
+
+
+def update_outbound_data_last_tried_write(entries: list[tuple[OutboundDataFlag, int, int]],
+        db: Optional[sqlite3.Connection]=None) -> None:
+    assert db is not None and isinstance(db, sqlite3.Connection)
+    sql = "UPDATE outbound_data SET outbound_data_flags=?, date_last_tried=? " \
+        "WHERE outbound_data_id=?"
+    cursor = db.executemany(sql, entries)
+    assert cursor.rowcount == len(entries)
+

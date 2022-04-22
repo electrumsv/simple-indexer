@@ -1,3 +1,6 @@
+from enum import IntFlag
+
+
 ZMQ_NODE_PORT = 28332
 ZMQ_TOPIC_HASH_BLOCK = b"hashblock"
 ZMQ_TOPIC_HASH_TX = b"hashtx"
@@ -13,4 +16,22 @@ INPUT_MATCH = 1 << 1
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 49241
 
+REFERENCE_SERVER_SCHEME = "http"
+REFERENCE_SERVER_HOST = "127.0.0.1"
+REFERENCE_SERVER_PORT = 47126
+
+# TODO(1.4.0) Technical debt. This is unused. Use it or remove it.
 COMMON_FILTER_LOOKAHEAD_BATCH_COUNT = 20
+
+
+
+class AccountFlag(IntFlag):
+    NONE                                    = 0
+
+
+class OutboundDataFlag(IntFlag):
+    NONE                                    = 0
+
+    TIP_FILTER_NOTIFICATIONS                = 1 << 0
+
+    DISPATCHED_SUCCESSFULLY                 = 1 << 20

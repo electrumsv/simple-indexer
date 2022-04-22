@@ -4,6 +4,8 @@ from typing import Any, Optional, NamedTuple, TypedDict
 
 import bitcoinx
 
+from .constants import AccountFlag, OutboundDataFlag
+
 
 OutpointType = tuple[bytes, int]
 OutpointJSONType = tuple[str, int]
@@ -169,5 +171,31 @@ class TipFilterRegistrationEntry(NamedTuple):
 
 class AccountMetadata(NamedTuple):
     account_id: int
-    tip_filter_callback_url: Optional[str]
-    tip_filter_callback_token: Optional[str]
+    external_account_id: int
+    account_flags: AccountFlag
+
+
+class TipFilterNotificationMatch(TypedDict):
+    pushDataHashHex: str
+    transactionId: str
+    transactionIndex: int
+    flags: int
+
+
+class TipFilterNotificationEntry(TypedDict):
+    accountId: int
+    matches: list[TipFilterNotificationMatch]
+
+
+class TipFilterNotificationBatch(TypedDict):
+    blockId: Optional[str]
+    entries: list[TipFilterNotificationEntry]
+
+
+class OutboundDataRow(NamedTuple):
+    outbound_data_id: Optional[int]
+    outbound_data: bytes
+    outbound_data_flags: OutboundDataFlag
+    date_created: int
+    date_last_tried: int
+
