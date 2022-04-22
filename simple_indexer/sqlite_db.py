@@ -53,7 +53,7 @@ class DatabaseInsertConflict(DatabaseError):
 
 
 def setup(db: Optional[sqlite3.Connection]=None) -> None:
-    assert db is not None and isinstance(db, sqlite3.Connection)
+    assert db is not None
     if int(os.getenv('SIMPLE_INDEX_RESET', "0")):
         drop_tables(db)
     create_tables(db)
