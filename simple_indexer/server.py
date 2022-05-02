@@ -193,8 +193,9 @@ class ApplicationState(object):
                             break
                         current_rows.append(row)
 
-                self.logger.debug("Outbound data delivery of %d entries, next delay will be %0.2f",
-                    len(current_rows), next_check_delay)
+                if len(current_rows) > 0:
+                    self.logger.debug("Outbound data delivery of %d entries, next delay will "
+                        "be %0.2f", len(current_rows), next_check_delay)
                 delivery_updates = list[tuple[OutboundDataFlag, int, int]]()
                 for row in current_rows:
                     assert row.outbound_data_id is not None
