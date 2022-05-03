@@ -69,7 +69,7 @@ def main() -> None:
     if len(sys.argv) == 3 and sys.argv[2]:
         to_height_text = sys.argv[2]
         if not to_height_text.isdigit():
-            print(f"to_height optional argument is not a number")
+            print("to_height optional argument is not a number")
             sys.exit(1)
         to_height = int(to_height_text)
 
