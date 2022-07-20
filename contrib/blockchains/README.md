@@ -73,3 +73,22 @@ in `blockchain_115_3677f4` (from heights 111-115) to a new block height of 116
 - Another random block, height 117 is added ontop to leave room for generating
 a block ontop of `blockchain_115_3677f4` to take the node out of initial block
 download mode.
+
+blockchain_117_155d19
+---------------------
+Builds directly on `blockchain_115_3677f4` which contains 2 invoice payments.
+One created in our own wallet as the payee (1.3.15) and paid by the mining wallet.
+One created in the ElectrumSV BIP270 server as the payee and paid by the
+v1.3.15 ElectrumSV wallet.
+
+Receive P2PKH:
+* Transaction id: 3b6c64b30c0b3be3a49e4e03daaf946004cc84ca510ae9b191868f9d81eab549
+* P2PKH address: mnpSpZRCUgin2pMuaoLgFL4rqSxEAWpXuS
+* Hash 160: 5017c39caf3af0c6e0f2bcd0735b6ed072d440df
+* Pushdata = SHA256(hash 160):544f6454c8b10e4982fcc34c5003da46f0c69b18581e024ddaa0da8c24d2d6c5
+
+Send P2PKH:
+* Transaction id: 23f46fde26d1676f55ae81aafe844618dd7abe7e7bf081ae99146f28a816b002
+* P2PKH address: mwi59DBTG6oS6PJWwPFu4YGJjVTvXXXNoF
+* Hash 160: b19c4ddcd9ce829b6bab5fc10f60b50b69645b2b
+* Pushdata = SHA256(hash 160):3a00577cd91c3e4c517462ae03339a712ac2281616aff66f18c705504d22f4d7
