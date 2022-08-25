@@ -489,12 +489,6 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
     if synchronizer is None:
         raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
-    accept_type = request.headers.get("Accept", "*/*")
-    if accept_type == "*/*":
-        accept_type = "application/octet-stream"
-    if accept_type != "application/octet-stream":
-        raise web.HTTPBadRequest(reason="only binary response body supported")
-
     content_type = request.headers.get("Content-Type")
     if content_type != 'application/octet-stream':
         raise web.HTTPBadRequest(reason="only binary request body supported")
@@ -529,7 +523,8 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
             external_account_id, pushdata_hash_list,
             update_flags=IndexerPushdataRegistrationFlag.DELETING,
             filter_flags=IndexerPushdataRegistrationFlag.FINALISED,
-            filter_mask=IndexerPushdataRegistrationFlag.MASK_FINALISED_DELETING_CLEAR,
+            filter_mask=IndexerPushdataRegistrationFlag.FINALISED |
+                IndexerPushdataRegistrationFlag.DELETING,
             require_all=True)
     except sqlite_db.DatabaseStateModifiedError:
         raise web.HTTPBadRequest(reason="some pushdata hashes are not registered")
