@@ -442,10 +442,8 @@ class Synchronizer(threading.Thread):
 
         self.logger.debug("Listening to node ZMQ...")
         # Wait on zmq pub/sub socket for new tip
-        # NOTE(typing) No type information for zmq.
-        context: zmq.Context = zmq.Context() # type: ignore[no-untyped-call]
-        # NOTE(typing) No type information for zmq.
-        work_receiver = context.socket(zmq.SUB) # type: ignore[no-untyped-call]
+        context = zmq.Context[zmq.Socket[bytes]]()
+        work_receiver = context.socket(zmq.SUB)
         try:
             work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")
             work_receiver.subscribe(ZMQ_TOPIC_HASH_BLOCK)
@@ -470,8 +468,7 @@ class Synchronizer(threading.Thread):
         finally:
             logger.debug("Closing maintain_chain_tip_thread thread ZMQ resources")
             work_receiver.close()
-            # NOTE(typing) No type information for zmq.
-            context.term() # type: ignore[no-untyped-call]
+            context.term()
             logger.debug("Exited maintain_chain_tip_thread thread")
 
     def poll_node_tip_thread(self) -> None:
@@ -505,19 +502,14 @@ class Synchronizer(threading.Thread):
     # To me this is cleaner than a daemon=True thread where the thread dies in an uncontrolled way
     def process_new_txs_thread(self) -> None:
         logger = logging.getLogger("process-new-txs-thread")
-        # NOTE(typing) No type information for zmq.
-        context: zmq.Context = zmq.Context() # type: ignore[no-untyped-call]
-        # NOTE(typing) No type information for zmq.
-        work_receiver: zmq.Socket = context.socket(zmq.SUB)  # type: ignore[no-untyped-call]
+        context = zmq.Context[zmq.Socket[bytes]]()
+        work_receiver = context.socket(zmq.SUB)
         try:
-            # NOTE(typing) No type information for zmq.
-            work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")# type: ignore[no-untyped-call]
-            # NOTE(typing) No type information for zmq.
-            work_receiver.subscribe(ZMQ_TOPIC_HASH_TX) # type: ignore[no-untyped-call]
+            work_receiver.connect(f"tcp://127.0.0.1:{ZMQ_NODE_PORT}")
+            work_receiver.subscribe(ZMQ_TOPIC_HASH_TX)
             while self.app_state.is_alive:
                 try:
-                    # NOTE(typing) No type information for zmq.
-                    if work_receiver.poll(1000, zmq.POLLIN): # type: ignore[no-untyped-call]
+                    if work_receiver.poll(1000, zmq.POLLIN):
                         msg = work_receiver.recv(zmq.NOBLOCK)
                         # logger.debug(f"Got message {msg}")
                     else:
@@ -538,10 +530,8 @@ class Synchronizer(threading.Thread):
                     logger.exception("unexpected exception in 'zmq_mempool_tx_sub_thread' thread")
         finally:
             logger.info("Closing process_new_txs thread ZMQ resources")
-            # NOTE(typing) No type information for zmq.
-            work_receiver.close() # type: ignore[no-untyped-call]
-            # NOTE(typing) No type information for zmq.
-            context.term() # type: ignore[no-untyped-call]
+            work_receiver.close()
+            context.term()
             logger.info("Exited process_new_txs thread")
 
     def _common_cuckoo_filter_expiry_thread(self, exit_condition: threading.Condition) -> None:
