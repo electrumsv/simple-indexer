@@ -104,8 +104,6 @@ if __name__ == "__main__":
         asyncio.run(main())
         sys.exit(0)
     except KeyboardInterrupt:
-        logger.debug("Simple Indexer stopped")
-    except Exception:
-        logger.exception("unexpected exception in __main__")
-    finally:
-        logger.info("Simple Indexer stopped")
+        logger.debug("Simple Indexer received keyboard interrupt")
+
+    logger.debug("Simple Indexer main thread done")

@@ -97,11 +97,13 @@ class Synchronizer(threading.Thread):
         self._initial_sync_complete = threading.Event()
         self._on_new_tip_lock = threading.RLock()
 
+        self._exit_condition = threading.Condition()
+
         maintain_chain_tip_thread = threading.Thread(target=self.maintain_chain_tip_thread)
         poll_node_thread = threading.Thread(target=self.poll_node_tip_thread)
         process_mempool_txs_thread = threading.Thread(target=self.process_new_txs_thread)
         common_cuckoo_filter_expiry_thread = threading.Thread(
-            target=self._common_cuckoo_filter_expiry_thread)
+            target=self._common_cuckoo_filter_expiry_thread, args=(self._exit_condition,))
         self.threads = (
             maintain_chain_tip_thread,
             poll_node_thread,
@@ -119,6 +121,9 @@ class Synchronizer(threading.Thread):
             self.logger.exception("unexpected exception in Synchronizer")
         finally:
             self.logger.info("Exiting synchronizer thread")
+            with self._exit_condition:
+                self._exit_condition.notify(n=1)
+            self.logger.info("Exited synchronizer thread")
 
     def insert_tx_rows(self, block_hash: bytes, txs: list[bitcoinx.Tx]) -> None:
         tx_rows: list[tuple[bytes, bytes, int, bytes]] = []
@@ -463,10 +468,11 @@ class Synchronizer(threading.Thread):
                 except Exception:
                     logger.exception("unexpected exception in 'maintain_chain_tip_thread' thread")
         finally:
-            logger.info("Closing maintain_chain_tip_thread thread")
+            logger.debug("Closing maintain_chain_tip_thread thread ZMQ resources")
             work_receiver.close()
             # NOTE(typing) No type information for zmq.
             context.term() # type: ignore[no-untyped-call]
+            logger.debug("Exited maintain_chain_tip_thread thread")
 
     def poll_node_tip_thread(self) -> None:
         """Continually poll the node for chain tip every 5 seconds. This is because ZMQ
@@ -474,7 +480,7 @@ class Synchronizer(threading.Thread):
         only has old timestamp blocks loaded, we can only find out via the RPC API."""
         logger = logging.getLogger("poll-node-tip-thread")
         self._initial_sync_complete.wait()
-        logger.info("Starting thread to poll for node tip")
+        logger.debug("Starting thread to poll for node tip")
         while self.app_state.is_alive:
             try:
                 result = electrumsv_node.call_any('getblockchaininfo').json()['result']
@@ -491,7 +497,7 @@ class Synchronizer(threading.Thread):
                 logger.info("Error polling node. Retrying in 5 seconds")
             finally:
                 time.sleep(5)
-
+        logger.debug("Exited poll_node_tip_thread thread")
 
     # Thread -> push to queue
     # zmq.NOBLOCK mode is used so that the loop has the opportunity to check for
@@ -531,20 +537,25 @@ class Synchronizer(threading.Thread):
                 except Exception:
                     logger.exception("unexpected exception in 'zmq_mempool_tx_sub_thread' thread")
         finally:
-            logger.info("Closing process_new_txs thread")
+            logger.info("Closing process_new_txs thread ZMQ resources")
             # NOTE(typing) No type information for zmq.
             work_receiver.close() # type: ignore[no-untyped-call]
             # NOTE(typing) No type information for zmq.
             context.term() # type: ignore[no-untyped-call]
+            logger.info("Exited process_new_txs thread")
 
-    def _common_cuckoo_filter_expiry_thread(self) -> None:
+    def _common_cuckoo_filter_expiry_thread(self, exit_condition: threading.Condition) -> None:
         """
         This batch deletes expired common cuckoo filter entries currently every thirty seconds.
         """
         while self.app_state.is_alive:
             wait_seconds = min(self._filter_expiry_next_time - int(time.time()), 30)
             if wait_seconds > 0:
-                time.sleep(wait_seconds)
+                with exit_condition:
+                    if not exit_condition.wait(wait_seconds):
+                        assert not self.app_state.is_alive
+                        return
+
             if int(time.time()) < self._filter_expiry_next_time:
                 continue
 
@@ -559,6 +570,7 @@ class Synchronizer(threading.Thread):
                 self.logger.debug("Filter hash expiry/removal removed %d entries",
                     len(pushdata_hashes))
             self._filter_expiry_next_time += 30
+        self.logger.debug("Exited cuckoo filter expiry thread")
 
     def register_output_spend_notifications(self, outpoints: list[OutpointType]) \
             -> list[OutputSpendRow]:

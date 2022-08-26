@@ -169,7 +169,7 @@ class ApplicationState(object):
         except Exception:
             self.logger.exception("unexpected exception in push_notifications_thread")
         finally:
-            self.logger.info("Exiting push notifications thread")
+            self.logger.info("Exited push notifications thread")
 
     async def _attempt_outbound_data_delivery_task(self) -> None:
         """
