@@ -28,7 +28,8 @@ os.environ['SIMPLE_INDEX_RESET'] = '0'
 
 
 def extract_relevant_non_coinbase_txs() -> None:
-    database_context = DatabaseContext(str(SCRIPT_PATH.parent.parent / 'simple_index.db'))
+    database_context = DatabaseContext(
+        str(SCRIPT_PATH.parent.parent / "localdata" / "simple_index.db"))
     db = database_context.acquire_connection()
     try:
         cursor = db.execute("""

@@ -36,8 +36,8 @@ aiohttp_logger.setLevel(logging.WARNING)
 logger = logging.getLogger("reference")
 
 
-NODE_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent.joinpath('node_headers.mmap')
-LOCAL_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent.joinpath('local_headers.mmap')
+NODE_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent / "localdata" / "node_headers.mmap"
+LOCAL_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent / "localdata" / "local_headers.mmap"
 MMAP_SIZE = 100_000  # headers count - should be ample for RegTest
 CHECKPOINT = CheckPoint(
     bytes.fromhex(
@@ -68,6 +68,9 @@ class ApplicationState(object):
         self.app = app
         self.loop = loop
 
+        data_path = MODULE_DIR.parent / "localdata"
+        data_path.mkdir(exist_ok=True)
+
         if int(os.getenv('SIMPLE_INDEX_RESET', "0")):
             self.reset_headers_stores()
 
@@ -85,7 +88,7 @@ class ApplicationState(object):
         port = os.getenv("REFERENCE_SERVER_PORT", REFERENCE_SERVER_PORT)
         self.reference_server_url = f"{scheme}://{host}:{port}"
 
-        datastore_location = MODULE_DIR.parent / 'simple_index.db'
+        datastore_location = MODULE_DIR.parent / "localdata" / "simple_index.db"
         self.database_context = DatabaseContext(str(datastore_location), write_warn_ms=10)
         self.database_context.run_in_thread(sqlite_db.setup)
 
