@@ -542,7 +542,7 @@ class Synchronizer(threading.Thread):
             wait_seconds = min(self._filter_expiry_next_time - int(time.time()), 30)
             if wait_seconds > 0:
                 with exit_condition:
-                    if not exit_condition.wait(wait_seconds):
+                    if exit_condition.wait(wait_seconds):
                         assert not self.app_state.is_alive
                         return
 
