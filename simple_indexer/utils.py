@@ -15,15 +15,16 @@ logger = logging.getLogger('utils')
 
 
 def wait_for_initial_node_startup(logger: logging.Logger) -> bool:
+    logger.error("Waiting for node '%s'", BITCOIN_NODE_URI)
     while True:
         try:
             response = electrumsv_node.call_any('getinfo')
             if response.status_code == 200:
-                logger.debug(f"Node at: {BITCOIN_NODE_URI} now available.")
+                logger.debug("Node '%s' detected", BITCOIN_NODE_URI)
                 return True
             else:
-                logger.debug(f"Node at: {BITCOIN_NODE_URI}. Still unavailable. Retrying...")
+                logger.debug("Node '%s' access issue (status code: %d)", BITCOIN_NODE_URI,
+                    response.status_code)
                 time.sleep(2)
         except Exception as e:
-            logger.error(f"still waiting for node on {BITCOIN_NODE_URI}")
             time.sleep(2)
