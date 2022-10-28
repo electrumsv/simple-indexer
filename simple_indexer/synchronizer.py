@@ -16,7 +16,7 @@ import zmq
 from .constants import GENESIS_HASH, NULL_HASH, ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, \
     ZMQ_TOPIC_HASH_TX
 from .parse_pushdata import get_pushdata_from_script
-from . import sqlite_db
+from . import sqlite_db, utils
 from .types import CuckooResult, IndexerPushdataRegistrationFlag, output_spend_struct, \
     OutputSpendRow, OutpointType, PushDataRow, TipFilterRegistrationEntry
 from .utils import wait_for_initial_node_startup
@@ -251,7 +251,7 @@ class Synchronizer(threading.Thread):
     def on_block(self, new_tip: bitcoinx.Header) -> None:
         block_hash_hex = hash_to_hex_str(new_tip.hash)
         # self.logger.debug(f"Got blockhash: {block_hash_hex}")
-        rawblock_hex = electrumsv_node.call_any('getblock', block_hash_hex, 0).json()['result']
+        rawblock_hex = utils.call_any('getblock', block_hash_hex, 0).json()['result']
         rawblock = bytes.fromhex(rawblock_hex)
         rawblock_stream = io.BytesIO(rawblock)
         self.parse_block(new_tip.hash, rawblock_stream)
@@ -259,7 +259,7 @@ class Synchronizer(threading.Thread):
             new_tip.height, rawblock)
 
     def on_tx(self, tx_id: str) -> None:
-        rawtx = electrumsv_node.call_any('getrawtransaction', tx_id, 1).json()['result']
+        rawtx = utils.call_any('getrawtransaction', tx_id, 1).json()['result']
         tx = bitcoinx.Tx.from_hex(rawtx['hex'])
         is_confirmed = rawtx.get('blockhash', False)
         is_mempool = not is_confirmed
@@ -330,8 +330,8 @@ class Synchronizer(threading.Thread):
     def sync_node_block_headers(self, to_height: int, from_height: int=0,
             headers_store: str='node') -> None:
         for height in range(from_height, to_height + 1):
-            block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
-            block_header: str = electrumsv_node.call_any('getblockheader', block_hash,
+            block_hash = utils.call_any('getblockhash', height).json()['result']
+            block_header: str = utils.call_any('getblockheader', block_hash,
                 False).json()['result']
             self.connect_header(height, bytes.fromhex(block_header), headers_store=headers_store)
 
@@ -375,7 +375,7 @@ class Synchronizer(threading.Thread):
                 f"{common_parent_height} to {reorg_new_tip.height}")
 
             for height in range(common_parent_height, new_best_tip + 1):
-                block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
+                block_hash = utils.call_any('getblockhash', height).json()['result']
                 header: bitcoinx.Header = self.app_state.node_headers.lookup(
                     hex_str_to_hash(block_hash))[0]
                 self.on_block(header)
@@ -383,7 +383,7 @@ class Synchronizer(threading.Thread):
 
     def sync_blocks(self, from_height: int=0, to_height: int=0) -> None:
         for height in range(from_height, to_height + 1):
-            block_hash = electrumsv_node.call_any('getblockhash', height).json()['result']
+            block_hash = utils.call_any('getblockhash', height).json()['result']
             header: bitcoinx.Header = \
                 self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
             self.on_block(header)
@@ -392,7 +392,7 @@ class Synchronizer(threading.Thread):
     def on_new_tip(self, block_hash_new_tip: str) -> None:
         """This should only be called after initial block download"""
         stored_node_tip = self.app_state.node_headers.longest_chain().tip
-        new_best_tip: dict[str, Any] = electrumsv_node.call_any('getblockheader',
+        new_best_tip: dict[str, Any] = utils.call_any('getblockheader',
             block_hash_new_tip, True).json()['result']
         self.logger.info("New tip received height: %d, stored node height: %d",
             new_best_tip['height'], stored_node_tip.height)
@@ -416,7 +416,7 @@ class Synchronizer(threading.Thread):
     def maintain_chain_tip_thread(self) -> None:
         logger = logging.getLogger("maintain-chain-tip-thread")
 
-        result = electrumsv_node.call_any('getblockchaininfo').json()['result']
+        result = utils.call_any('getblockchaininfo').json()['result']
         node_tip_height = result['headers']
 
         self.sync_node_block_headers(node_tip_height, from_height=0)
@@ -436,7 +436,7 @@ class Synchronizer(threading.Thread):
         self.logger.debug("Initial block download complete. Waiting for the next block...")
         self.completed_initial_download = True
         self.logger.debug("Requesting mempool...")
-        mempool_tx_hashes = electrumsv_node.call_any('getrawmempool').json()['result']
+        mempool_tx_hashes = utils.call_any('getrawmempool').json()['result']
         for tx_hash in mempool_tx_hashes:
             self.on_tx(tx_hash)
 
@@ -480,14 +480,14 @@ class Synchronizer(threading.Thread):
         logger.debug("Starting thread to poll for node tip")
         while self.app_state.is_alive:
             try:
-                result = electrumsv_node.call_any('getblockchaininfo').json()['result']
+                result = utils.call_any('getblockchaininfo').json()['result']
                 node_tip_height = result['headers']
                 while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
-                    node_tip_height = electrumsv_node.call_any('getblockchaininfo') \
+                    node_tip_height = utils.call_any('getblockchaininfo') \
                                                      .json()['result']['headers']
                     local_height = self.app_state.local_headers.longest_chain().tip.height
                     next_block_hash_in_sequence: str = \
-                        electrumsv_node.call_any('getblockhash', local_height + 1).json()['result']
+                        utils.call_any('getblockhash', local_height + 1).json()['result']
                     with self._on_new_tip_lock:
                         self.on_new_tip(next_block_hash_in_sequence)
             except requests.exceptions.HTTPError:

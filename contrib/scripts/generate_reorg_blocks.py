@@ -16,10 +16,10 @@ from pathlib import Path
 
 import bitcoinx
 from electrumsv_database.sqlite import DatabaseContext
-from electrumsv_node import electrumsv_node
 from electrumsv_sdk import commands
 
 from contrib.scripts.import_blocks import import_blocks
+from simple_indexer import utils
 
 SCRIPT_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
 BLOCKCHAIN_PATH = SCRIPT_PATH.parent / 'blockchains' / 'blockchain_115_3677f4'
@@ -73,7 +73,7 @@ def submit_transactions() -> None:
         successes = []
         for tx_hash, tx in non_coinbase_txs.items():
             try:
-                electrumsv_node.call_any('sendrawtransaction', tx.to_hex())
+                utils.call_any('sendrawtransaction', tx.to_hex())
                 successes.append(tx_hash)
             except Exception as e:
                 # It's hard to know the correct order of submitting the txs so use trial and error
@@ -88,6 +88,6 @@ extract_relevant_non_coinbase_txs()  # From blockchain_115_36_3677f4
 reset_node()
 # From blockchain_115_36_3677f4 to height 110 of 115
 import_blocks(str(BLOCKCHAIN_PATH), to_height=110)
-electrumsv_node.call_any('generate', 5)  # Random 5 blocks
+utils.call_any('generate', 5)  # Random 5 blocks
 submit_transactions()  # Same txs from blockchain_115_36_3677f4 will now be mined at height 116
-electrumsv_node.call_any('generate', 1)
+utils.call_any('generate', 1)

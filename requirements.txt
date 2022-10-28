@@ -1,5 +1,7 @@
+aiohttp
 bitcoinx
-refcuckoo>=1.0
+electrumsv_node
 electrumsv_database>=1.6
+refcuckoo>=1.0
 pyzmq
 requests>=2.21.0

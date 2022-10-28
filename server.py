@@ -93,7 +93,9 @@ class AiohttpServer:
 async def main() -> None:
     setup_logging()
     app = get_aiohttp_app()
-    server = AiohttpServer(app)
+    server_host = os.getenv('SERVER_HOST', SERVER_HOST)
+    server_port = int(os.getenv('SERVER_PORT', SERVER_PORT))
+    server = AiohttpServer(app, server_host, server_port)
     try:
         await server.start()
     finally:

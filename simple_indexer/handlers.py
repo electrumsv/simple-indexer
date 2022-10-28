@@ -11,7 +11,7 @@ from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from electrumsv_node import electrumsv_node
 
 from .constants import SERVER_HOST, SERVER_PORT
-from . import sqlite_db
+from . import sqlite_db, utils
 from .types import FILTER_RESPONSE_SIZE, filter_response_struct, IndexerPushdataRegistrationFlag, \
     outpoint_struct, OutpointJSONType, output_spend_struct, OutpointType, \
     RestorationFilterRequest, tip_filter_entry_struct, TipFilterRegistrationEntry, \
@@ -183,7 +183,7 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
     # Request TSC merkle proof from the node
     # Todo - binary format not currently supported by the node
     try:
-        tsc_merkle_proof = electrumsv_node.call_any("getmerkleproof2",
+        tsc_merkle_proof = utils.call_any("getmerkleproof2",
             hash_to_hex_str(block_hash), txid, include_full_tx, target_type).json()['result']
 
         if accept_type == 'application/octet-stream':
@@ -195,10 +195,10 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
     except requests.exceptions.HTTPError as e:
         # the node does not return merkle proofs when there is only a single coinbase tx
         # in the block. It could be argued that this is a bug and it should return the same format.
-        result = electrumsv_node.call_any("getrawtransaction", txid, 1).json()['result']
+        result = utils.call_any("getrawtransaction", txid, 1).json()['result']
         rawtx = result['hex']
         blockhash = result['blockhash']
-        result = electrumsv_node.call_any("getblock", blockhash).json()['result']
+        result = utils.call_any("getblock", blockhash).json()['result']
         num_tx = result['num_tx']
         if num_tx != 1:
             return web.Response(status=404)
@@ -213,7 +213,7 @@ async def get_merkle_proof(request: web.Request) -> web.Response:
             if target_type == 'hash':
                 target = blockhash
             elif target_type == 'header':
-                target = electrumsv_node.call_any("getblockheader", blockhash,
+                target = utils.call_any("getblockheader", blockhash,
                     False).json()['result']
             elif target_type == 'merkleroot':
                 target = merkleroot

@@ -386,4 +386,6 @@ def get_aiohttp_app() -> web.Application:
 
 if __name__ == "__main__":
     app = get_aiohttp_app()
-    web.run_app(app, host=SERVER_HOST, port=SERVER_PORT)
+    server_host = os.getenv('SERVER_HOST', SERVER_HOST)
+    server_port = int(os.getenv('SERVER_PORT', SERVER_PORT))
+    web.run_app(app, host=server_host, port=server_port)
