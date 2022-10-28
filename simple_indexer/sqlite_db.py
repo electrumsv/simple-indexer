@@ -24,6 +24,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import sys
+if sys.platform == 'linux':
+    import pysqlite3 as pysqlite3
+    sqlite3.Connection = pysqlite3.Connection
+
 import threading
 from typing import Any, cast, Generator, NamedTuple, Optional, Union
 
