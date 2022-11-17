@@ -9,6 +9,7 @@ from .constants import AccountFlag, OutboundDataFlag
 
 OutpointType = tuple[bytes, int]
 OutpointJSONType = tuple[str, int]
+PushdataRegistrationJSONType = tuple[str, int]  # pushdata_hash, duration_seconds
 
 
 ZEROED_OUTPOINT: OutpointType = (bytes(32), 0)

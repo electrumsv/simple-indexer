@@ -1,21 +1,20 @@
 from __future__ import annotations
+from aiohttp import web
+from bitcoinx import hex_str_to_hash, hash_to_hex_str
 from datetime import datetime, timedelta
 import json
-from typing import Any, cast, Dict, Optional, TYPE_CHECKING
-
-import requests
-from aiohttp import web
+from json import JSONDecodeError
 import logging
-
-from bitcoinx import hex_str_to_hash, hash_to_hex_str
-from electrumsv_node import electrumsv_node
+import requests
+from typing import Any, cast, Dict, Optional, TYPE_CHECKING
 
 from .constants import SERVER_HOST, SERVER_PORT
 from . import sqlite_db, utils
 from .types import FILTER_RESPONSE_SIZE, filter_response_struct, IndexerPushdataRegistrationFlag, \
     outpoint_struct, OutpointJSONType, output_spend_struct, OutpointType, \
-    RestorationFilterRequest, tip_filter_entry_struct, TipFilterRegistrationEntry, \
-    TipFilterRegistrationResponse, tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
+    PushdataRegistrationJSONType, RestorationFilterRequest, tip_filter_entry_struct, \
+    TipFilterRegistrationEntry, TipFilterRegistrationResponse, tsc_merkle_proof_json_to_binary, \
+    ZEROED_OUTPOINT
 
 if TYPE_CHECKING:
     from .server import ApplicationState
@@ -413,10 +412,6 @@ async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
     if accept_type != "application/json":
         raise web.HTTPBadRequest(reason="only json response body supported")
 
-    content_type = request.headers.get("Content-Type")
-    if content_type not in ("application/octet-stream", "*/*"):
-        raise web.HTTPBadRequest(reason="only binary request body supported")
-
     try:
         account_id_text = request.query.get("account_id", "")
         external_account_id = int(account_id_text)
@@ -433,16 +428,29 @@ async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
     if not body:
         raise web.HTTPBadRequest(reason="no body")
 
-    if len(body) % tip_filter_entry_struct.size != 0:
-        raise web.HTTPBadRequest(reason="binary request body malformed")
-
     # Currently we only allow registrations between five minutes and seven days.
     minimum_seconds = 5 * 60
     maximum_seconds = 7 * 24 * 60 * 60
     registration_entries = list[TipFilterRegistrationEntry]()
-    for entry_index in range(len(body) // tip_filter_entry_struct.size):
-        entry = TipFilterRegistrationEntry(*tip_filter_entry_struct.unpack_from(body,
-            entry_index * tip_filter_entry_struct.size))
+    content_type = request.headers.get("Content-Type")
+    if content_type == "application/octet-stream":
+        if len(body) % tip_filter_entry_struct.size != 0:
+            raise web.HTTPBadRequest(reason="binary request body malformed")
+        for entry_index in range(len(body) // tip_filter_entry_struct.size):
+            entry = TipFilterRegistrationEntry(*tip_filter_entry_struct.unpack_from(body,
+                entry_index * tip_filter_entry_struct.size))
+            registration_entries.append(entry)
+    elif content_type in ("application/json", "*/*"):
+        try:
+            json_body = cast(list[PushdataRegistrationJSONType], json.loads(body))
+        except JSONDecodeError as e:
+            raise web.HTTPBadRequest(reason="JSONDecodeError: %s" % e)
+        for pushdata_hash_hex, duration_seconds in json_body:
+            pushdata_hash = bytes.fromhex(pushdata_hash_hex)
+            entry = TipFilterRegistrationEntry(pushdata_hash, duration_seconds)
+            registration_entries.append(entry)
+
+    for entry in registration_entries:
         if entry.duration_seconds < minimum_seconds:
             raise web.HTTPBadRequest(
                 reason=f"An entry has a duration of {entry.duration_seconds} which is lower than "
@@ -451,7 +459,6 @@ async def indexer_post_transaction_filter(request: web.Request) -> web.Response:
             raise web.HTTPBadRequest(
                 reason=f"An entry has a duration of {entry.duration_seconds} which is higher than "
                     f"the maximum value {maximum_seconds}")
-        registration_entries.append(entry)
 
     logger.debug("Adding tip filter entries to database %s", registration_entries)
     # It is required that the client knows what it is doing and this is enforced by disallowing
@@ -489,9 +496,15 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
     if synchronizer is None:
         raise web.HTTPServiceUnavailable(reason="error finding synchronizer")
 
+    try:
+        account_id_text = request.query.get("account_id", "")
+        external_account_id = int(account_id_text)
+    except (KeyError, ValueError):
+        raise web.HTTPBadRequest(reason="`account_id` is not a number")
+
     content_type = request.headers.get("Content-Type")
-    if content_type != 'application/octet-stream':
-        raise web.HTTPBadRequest(reason="only binary request body supported")
+    if content_type not in ("application/octet-stream", "application/json", "*/*"):
+        raise web.HTTPBadRequest(reason="only binary or json request body supported")
 
     try:
         account_id_text = request.query.get("account_id", "")
@@ -502,12 +515,21 @@ async def indexer_post_transaction_filter_delete(request: web.Request) -> web.Re
     body = await request.content.read()
     if not body:
         raise web.HTTPBadRequest(reason="no body")
-    if len(body) % 32 != 0:
-        raise web.HTTPBadRequest(reason="binary request body malformed")
-
     pushdata_hashes: set[bytes] = set()
-    for pushdata_index in range(len(body) // 32):
-        pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
+    if content_type == "application/octet-stream":
+        if len(body) % 32 != 0:
+            raise web.HTTPBadRequest(reason="binary request body malformed")
+        for pushdata_index in range(len(body) // 32):
+            pushdata_hashes.add(body[pushdata_index:pushdata_index+32])
+    elif content_type in ("application/json", "*/*"):
+        try:
+            json_body = json.loads(body)
+        except JSONDecodeError as e:
+            raise web.HTTPBadRequest(reason="JSONDecodeError: %s" % e)
+        for pushdata_hex in json_body:
+            pushdata_hash = bytes.fromhex(pushdata_hex)
+            pushdata_hashes.add(pushdata_hash)
+
     if not len(pushdata_hashes):
         raise web.HTTPBadRequest(reason="no pushdata hashes provided")
 
