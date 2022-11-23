@@ -105,6 +105,11 @@ async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
 
         total_size = count * FILTER_RESPONSE_SIZE
         logger.debug(f"Total pushdata filter match response size: {total_size} for count: {count}")
+
+        # This null byte terminator is so that the client can be sure they have iterated through
+        # all entries (and that the stream did not stop for some other reason like a disconnection)
+        finalization_flag = b'\x00'
+        await response.write(finalization_flag)
     else:
         headers = {'Content-Type': 'application/json', 'User-Agent': 'SimpleIndexer'}
         response = web.StreamResponse(status=200, reason='OK', headers=headers)
@@ -116,6 +121,8 @@ async def get_restoration_matches(request: web.Request) -> web.StreamResponse:
             data = (json.dumps(match) + "\n").encode('utf-8')
             await response.write(data)
 
+        # This terminator symbol is so that the client can be sure they have iterated through
+        # all entries (and that the stream did not stop for some other reason like a disconnection)
         await response.write(b"{}")
     return response
 
