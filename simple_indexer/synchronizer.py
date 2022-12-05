@@ -171,8 +171,19 @@ class Synchronizer(threading.Thread):
 
         self.database_context.run_in_thread(sqlite_db.insert_input_rows, input_rows)
 
-    def insert_pushdata_rows(self, txs: list[bitcoinx.Tx],
-            filter_matches: list[PushDataRow]) -> None:
+    def insert_pushdata_rows(self, pushdata_rows: list[PushDataRow]) -> None:
+        self.database_context.run_in_thread(sqlite_db.insert_pushdata_rows, pushdata_rows)
+
+    def get_processed_vs_unprocessed_txs(self, txs: list[bitcoinx.Tx]) \
+            -> tuple[set[bytes], set[bytes]]:
+        """Feed the tx hashes in the block to this SELECT query to see which have already been
+        processed via the mempool"""
+        tx_hashes = set(tx.hash() for tx in txs)
+        processed_tx_hashes = sqlite_db.get_matching_mempool_txids(self.database_context, tx_hashes)
+        unprocessed_tx_hashes = tx_hashes - processed_tx_hashes
+        return processed_tx_hashes, unprocessed_tx_hashes
+
+    def parse_pushdatas(self, txs: list[bitcoinx.Tx]) -> list[PushDataRow]:
         pushdata_rows: list[PushDataRow] = []
         for tx in txs:
             tx_hash = tx.hash()
@@ -193,21 +204,7 @@ class Synchronizer(threading.Thread):
                         ref_type = 0  # An output
                         pushdata_row = PushDataRow(pushdata_hash, tx_hash, out_idx, ref_type)
                         pushdata_rows.append(pushdata_row)
-
-        self.database_context.run_in_thread(sqlite_db.insert_pushdata_rows, pushdata_rows)
-
-        for pushdata_row in pushdata_rows:
-            if self._common_cuckoo.contains(pushdata_row.pushdata_hash) == CuckooResult.OK:
-                filter_matches.append(pushdata_row)
-
-    def get_processed_vs_unprocessed_txs(self, txs: list[bitcoinx.Tx]) \
-            -> tuple[set[bytes], set[bytes]]:
-        """Feed the tx hashes in the block to this SELECT query to see which have already been
-        processed via the mempool"""
-        tx_hashes = set(tx.hash() for tx in txs)
-        processed_tx_hashes = sqlite_db.get_matching_mempool_txids(self.database_context, tx_hashes)
-        unprocessed_tx_hashes = tx_hashes - processed_tx_hashes
-        return processed_tx_hashes, unprocessed_tx_hashes
+        return pushdata_rows
 
     def parse_block(self, block_hash: bytes, rawblock_stream: io.BytesIO) -> None:
         # Todo add a block headers table and insert this there
@@ -226,10 +223,14 @@ class Synchronizer(threading.Thread):
         filter_matches: list[PushDataRow] = []
         for tx in txs:
             tx_hash = tx.hash()
+            pushdata_rows = self.parse_pushdatas([tx])
+            for pushdata_row in pushdata_rows:
+                if self._common_cuckoo.contains(pushdata_row.pushdata_hash) == CuckooResult.OK:
+                    filter_matches.append(pushdata_row)
             if tx_hash in unprocessed_txs_hashes:
                 self.insert_txo_rows([tx])
                 self.insert_input_rows([tx])
-                self.insert_pushdata_rows([tx], filter_matches)
+                self.insert_pushdata_rows(pushdata_rows)
 
             # Dispatch any spent output notifications.
             for in_idx, tx_input in enumerate(tx.inputs):
@@ -275,8 +276,11 @@ class Synchronizer(threading.Thread):
                 return
             self.insert_txo_rows([tx])
             self.insert_input_rows([tx])
-            self.insert_pushdata_rows([tx], filter_matches)
-
+            pushdata_rows = self.parse_pushdatas([tx])
+            self.insert_pushdata_rows(pushdata_rows)
+            for pushdata_row in pushdata_rows:
+                if self._common_cuckoo.contains(pushdata_row.pushdata_hash) == CuckooResult.OK:
+                    filter_matches.append(pushdata_row)
             # TODO(1.4.0) Concurrency. There is no reason for this to block the synchronizer.
             tx_hash = hex_str_to_hash(tx_id)
             for in_idx, tx_input in enumerate(tx.inputs):
