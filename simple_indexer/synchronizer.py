@@ -7,7 +7,7 @@ import time
 from typing import Any, cast, Optional, TYPE_CHECKING
 
 import bitcoinx
-from bitcoinx import hex_str_to_hash, hash_to_hex_str
+from bitcoinx import hex_str_to_hash, hash_to_hex_str, double_sha256
 import refcuckoo
 from electrumsv_node import electrumsv_node
 import requests
@@ -308,12 +308,12 @@ class Synchronizer(threading.Thread):
         try:
             if headers_store == 'node':
                 self.app_state.node_headers.connect(raw_header)
-                self.app_state.node_headers.flush()
+                self.app_state.flush_node_headers()
                 # self.logger.debug(f"Connected header (node store) height: {height}; "
                 #                   f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
             else:
                 self.app_state.local_headers.connect(raw_header)
-                self.app_state.local_headers.flush()
+                self.app_state.flush_local_headers()
                 # self.logger.debug(f"Connected header (local store) tip height: {height}; "
                 #                   f"hash: {hash_to_hex_str(double_sha256(raw_header))}")
 
@@ -351,9 +351,9 @@ class Synchronizer(threading.Thread):
         orphaned_chain = None
         reorg_chain = None
         for chain in chains:
-            if chain.tip.hash == reorg_node_tip.hash:
+            if chain.tip().hash == reorg_node_tip.hash:
                 reorg_chain = chain
-            if chain.tip.hash == orphaned_tip.hash:
+            if chain.tip().hash == orphaned_tip.hash:
                 orphaned_chain = chain
 
         if reorg_chain is not None and orphaned_chain is not None:
@@ -370,7 +370,7 @@ class Synchronizer(threading.Thread):
         self.backfill_headers(new_best_tip)
         count_chains_after_backfill = len(self.app_state.node_headers.chains())
         if count_chains_after_backfill > count_chains_before:
-            reorg_new_tip = self.app_state.node_headers.longest_chain().tip
+            reorg_new_tip = self.app_state.node_headers.longest_chain().tip()
             chain, common_parent_height = self.find_common_parent(reorg_new_tip, orphaned_tip)
 
             depth = reorg_new_tip.height - common_parent_height - 1
@@ -380,22 +380,22 @@ class Synchronizer(threading.Thread):
 
             for height in range(common_parent_height, new_best_tip + 1):
                 block_hash = utils.call_any('getblockhash', height).json()['result']
-                header: bitcoinx.Header = self.app_state.node_headers.lookup(
-                    hex_str_to_hash(block_hash))[0]
+                header, chain = self.app_state.lookup_header(
+                    hex_str_to_hash(block_hash), self.app_state.node_headers)
                 self.on_block(header)
                 self.connect_header(height, header.raw, headers_store='local')
 
     def sync_blocks(self, from_height: int=0, to_height: int=0) -> None:
         for height in range(from_height, to_height + 1):
             block_hash = utils.call_any('getblockhash', height).json()['result']
-            header: bitcoinx.Header = \
-                self.app_state.node_headers.lookup(hex_str_to_hash(block_hash))[0]
+            header, chain = self.app_state.lookup_header(
+                hex_str_to_hash(block_hash), self.app_state.node_headers)
             self.on_block(header)
             self.connect_header(height, header.raw, headers_store='local')
 
     def on_new_tip(self, block_hash_new_tip: str) -> None:
         """This should only be called after initial block download"""
-        stored_node_tip = self.app_state.node_headers.longest_chain().tip
+        stored_node_tip = self.app_state.node_headers.longest_chain().tip()
         new_best_tip: dict[str, Any] = utils.call_any('getblockheader',
             block_hash_new_tip, True).json()['result']
         self.logger.info("New tip received height: %d, stored node height: %d",
@@ -409,7 +409,7 @@ class Synchronizer(threading.Thread):
         except bitcoinx.MissingHeader:
             self.on_reorg(stored_node_tip, new_best_tip['height'])
         finally:
-            new_tip = self.app_state.node_headers.longest_chain().tip
+            new_tip = self.app_state.node_headers.longest_chain().tip()
             self.logger.info("New best tip height: %s, hash: %s", new_tip.height,
                 hash_to_hex_str(new_tip.hash))
 
@@ -423,18 +423,17 @@ class Synchronizer(threading.Thread):
         result = utils.call_any('getblockchaininfo').json()['result']
         node_tip_height = result['headers']
 
-        self.sync_node_block_headers(node_tip_height, from_height=0)
-
-        while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
-            local_tip_height = self.app_state.local_headers.longest_chain().tip.height
+        self.sync_node_block_headers(node_tip_height,
+            from_height=self.app_state.local_headers.longest_chain().tip().height)
+        while node_tip_height > self.app_state.local_headers.longest_chain().tip().height:
+            local_tip_height = self.app_state.local_headers.longest_chain().tip().height
             new_header: bitcoinx.Header = self.app_state.node_headers.header_at_height(
                 self.app_state.node_headers.longest_chain(), local_tip_height+1)
             self.on_block(new_header)
             self.connect_header(local_tip_height+1, new_header.raw, headers_store='local')
-
         self._initial_sync_complete.set()
 
-        new_tip = self.app_state.node_headers.longest_chain().tip
+        new_tip = self.app_state.node_headers.longest_chain().tip()
         self.logger.info(f"New best tip height: {new_tip.height}, "
             f"hash: {hash_to_hex_str(new_tip.hash)}")
         self.logger.debug("Initial block download complete. Waiting for the next block...")
@@ -486,10 +485,10 @@ class Synchronizer(threading.Thread):
             try:
                 result = utils.call_any('getblockchaininfo').json()['result']
                 node_tip_height = result['headers']
-                while node_tip_height > self.app_state.local_headers.longest_chain().tip.height:
+                while node_tip_height > self.app_state.local_headers.longest_chain().tip().height:
                     node_tip_height = utils.call_any('getblockchaininfo') \
                                                      .json()['result']['headers']
-                    local_height = self.app_state.local_headers.longest_chain().tip.height
+                    local_height = self.app_state.local_headers.longest_chain().tip().height
                     next_block_hash_in_sequence: str = \
                         utils.call_any('getblockhash', local_height + 1).json()['result']
                     with self._on_new_tip_lock:

@@ -14,9 +14,10 @@ import time
 from typing import Dict, Optional, TypeVar
 
 from aiohttp import web
-from bitcoinx import BitcoinRegtest, CheckPoint, hash_to_hex_str, Headers
+from bitcoinx import BitcoinRegtest, hash_to_hex_str, Headers, Header, Chain, MissingHeader
 from electrumsv_database.sqlite import DatabaseContext
 
+from simple_indexer.cached_headers import read_cached_headers, write_cached_headers
 from .constants import OutboundDataFlag, REFERENCE_SERVER_HOST, REFERENCE_SERVER_PORT, \
     REFERENCE_SERVER_SCHEME, SERVER_HOST, SERVER_PORT
 from .handlers_ws import SimpleIndexerWebSocket, WSClient
@@ -36,15 +37,9 @@ aiohttp_logger.setLevel(logging.WARNING)
 logger = logging.getLogger("reference")
 
 
-NODE_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent / "localdata" / "node_headers.mmap"
-LOCAL_HEADERS_MMAP_FILEPATH = MODULE_DIR.parent / "localdata" / "local_headers.mmap"
+NODE_HEADERS_FILEPATH = MODULE_DIR.parent / "localdata" / "node_headers"
+LOCAL_HEADERS_FILEPATH = MODULE_DIR.parent / "localdata" / "local_headers"
 MMAP_SIZE = 100_000  # headers count - should be ample for RegTest
-CHECKPOINT = CheckPoint(
-    bytes.fromhex(
-        "010000000000000000000000000000000000000000000000000000000000000000000000"
-        "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494d"
-        "ffff7f2002000000"), height=0, prev_work=0
-)
 
 T2 = TypeVar("T2")
 
@@ -74,8 +69,11 @@ class ApplicationState(object):
         if int(os.getenv('SIMPLE_INDEX_RESET', "0")):
             self.reset_headers_stores()
 
-        self.node_headers = Headers(BitcoinRegtest, NODE_HEADERS_MMAP_FILEPATH, CHECKPOINT)
-        self.local_headers = Headers(BitcoinRegtest, LOCAL_HEADERS_MMAP_FILEPATH, CHECKPOINT)
+        self.node_headers = Headers(BitcoinRegtest)
+        self.node_headers, self.node_cursor = read_cached_headers(BitcoinRegtest,
+            str(NODE_HEADERS_FILEPATH))
+        self.local_headers, self.local_cursor = read_cached_headers(BitcoinRegtest,
+            str(LOCAL_HEADERS_FILEPATH))
 
         self.ws_clients: Dict[str, WSClient] = {}
         self.ws_clients_lock: threading.RLock = threading.RLock()
@@ -107,28 +105,35 @@ class ApplicationState(object):
         self._outbound_data_delivery_future.cancel()
         await self.aiohttp_session.close()
 
-    def reset_headers_stores(self) -> None:
-        if sys.platform == 'win32':
-            if os.path.exists(NODE_HEADERS_MMAP_FILEPATH):
-                with open(NODE_HEADERS_MMAP_FILEPATH, 'w+') as f:
-                    mm = mmap.mmap(f.fileno(), MMAP_SIZE)
-                    mm.seek(0)
-                    mm.write(b'\00' * mm.size())
+    def lookup_header(self, block_hash: bytes, headers: Headers) -> tuple[Header, Chain]:
+        """
+        Raises `MissingHeader` if there is no header with the given height in the header store.
+        """
+        # The bitcoinx Headers.lookup method API has changed in v0.8
+        # it used to return a tuple[Header, Chain] and raise MissingHeader if no header
+        # was found. This allows us to expose the same API from app_state.lookup as before.
+        chain: Chain
+        chain, height = headers.lookup(block_hash)
+        if chain is None:
+            raise MissingHeader(f"No header found for hash: "
+                f"{hash_to_hex_str(block_hash)}")
+        header = chain.header_at_height(height)
+        return header, chain
 
-            # remove block headers - memory-mapped so need to do it to free memory immediately
-            if os.path.exists(LOCAL_HEADERS_MMAP_FILEPATH):
-                with open(LOCAL_HEADERS_MMAP_FILEPATH, 'w+') as f:
-                    mm = mmap.mmap(f.fileno(), MMAP_SIZE)
-                    mm.seek(0)
-                    mm.write(b'\00' * mm.size())
-        else:
-            try:
-                if os.path.exists(NODE_HEADERS_MMAP_FILEPATH):
-                    os.remove(NODE_HEADERS_MMAP_FILEPATH)
-                if os.path.exists(LOCAL_HEADERS_MMAP_FILEPATH):
-                    os.remove(LOCAL_HEADERS_MMAP_FILEPATH)
-            except FileNotFoundError:
-                pass
+    def flush_node_headers(self):
+        write_cached_headers(self.node_headers, self.node_cursor, NODE_HEADERS_FILEPATH)
+
+    def flush_local_headers(self):
+        write_cached_headers(self.local_headers, self.local_cursor, LOCAL_HEADERS_FILEPATH)
+
+    def reset_headers_stores(self) -> None:
+        try:
+            if os.path.exists(NODE_HEADERS_FILEPATH):
+                os.remove(NODE_HEADERS_FILEPATH)
+            if os.path.exists(LOCAL_HEADERS_FILEPATH):
+                os.remove(LOCAL_HEADERS_FILEPATH)
+        except FileNotFoundError:
+            pass
 
     def start_threads(self) -> None:
         threading.Thread(target=self.push_notifications_thread, daemon=True).start()
