@@ -18,7 +18,7 @@ import bitcoinx
 from electrumsv_database.sqlite import DatabaseContext
 from electrumsv_sdk import commands
 
-from contrib.scripts.import_blocks import import_blocks
+from import_blocks import import_blocks
 from simple_indexer import utils
 
 SCRIPT_PATH = Path(os.path.dirname(os.path.abspath(__file__)))

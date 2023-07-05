@@ -13,7 +13,6 @@ from typing import cast
 import bitcoinx
 from bitcoinx import Headers, Network
 
-
 # A reference to this cursor must be maintained and passed to the Headers.unpersisted_headers
 # function in order to determine which newly appended headers still need to be appended
 # to disc

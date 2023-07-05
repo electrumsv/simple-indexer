@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, cast
 
 from electrumsv_node import electrumsv_node
 from requests import Response
@@ -18,9 +18,9 @@ logger = logging.getLogger('utils')
 
 
 def call_any(method_name: str, *args: Any) -> Response:
-    return electrumsv_node.call_any(method_name, *args,
+    return cast(Response, electrumsv_node.call_any(method_name, *args,
         rpchost=BITCOIN_NODE_HOST, rpcport=BITCOIN_NODE_PORT,
-        rpcuser=BITCOIN_NODE_RPCUSER, rpcpassword=BITCOIN_NODE_RPCPASSWORD)
+        rpcuser=BITCOIN_NODE_RPCUSER, rpcpassword=BITCOIN_NODE_RPCPASSWORD))
 
 
 def wait_for_initial_node_startup(logger: logging.Logger) -> bool:

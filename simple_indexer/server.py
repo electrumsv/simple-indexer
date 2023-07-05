@@ -1,32 +1,31 @@
-import aiohttp
 import asyncio
 import concurrent.futures
 from http import HTTPStatus
 import json
 import logging
-import mmap
 import os
 from pathlib import Path
 import queue
-import sys
 import threading
 import time
 from typing import Dict, Optional, TypeVar
 
+import aiohttp
 from aiohttp import web
-from bitcoinx import BitcoinRegtest, hash_to_hex_str, Headers, Header, Chain, MissingHeader
+from bitcoinx import BitcoinRegtest, Chain, hash_to_hex_str, Header, Headers, MissingHeader
 from electrumsv_database.sqlite import DatabaseContext
-
 from simple_indexer.cached_headers import read_cached_headers, write_cached_headers
-from .constants import OutboundDataFlag, REFERENCE_SERVER_HOST, REFERENCE_SERVER_PORT, \
-    REFERENCE_SERVER_SCHEME, SERVER_HOST, SERVER_PORT
-from .handlers_ws import SimpleIndexerWebSocket, WSClient
-from . import handlers
-from . import sqlite_db
-from .synchronizer import Synchronizer
-from .types import OutboundDataRow, PushDataRow, TipFilterNotificationBatch, \
-    TipFilterNotificationEntry
 
+from . import handlers, sqlite_db
+from .constants import (
+    OutboundDataFlag, REFERENCE_SERVER_HOST, REFERENCE_SERVER_PORT, REFERENCE_SERVER_SCHEME,
+    SERVER_HOST, SERVER_PORT
+)
+from .handlers_ws import SimpleIndexerWebSocket, WSClient
+from .synchronizer import Synchronizer
+from .types import (
+    OutboundDataRow, PushDataRow, TipFilterNotificationBatch, TipFilterNotificationEntry
+)
 
 MODULE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -120,10 +119,10 @@ class ApplicationState(object):
         header = chain.header_at_height(height)
         return header, chain
 
-    def flush_node_headers(self):
+    def flush_node_headers(self) -> None:
         write_cached_headers(self.node_headers, self.node_cursor, NODE_HEADERS_FILEPATH)
 
-    def flush_local_headers(self):
+    def flush_local_headers(self) -> None:
         write_cached_headers(self.local_headers, self.local_cursor, LOCAL_HEADERS_FILEPATH)
 
     def reset_headers_stores(self) -> None:

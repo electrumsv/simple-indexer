@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import io
 import logging
 import queue
@@ -7,18 +8,20 @@ import time
 from typing import Any, cast, Optional, TYPE_CHECKING
 
 import bitcoinx
-from bitcoinx import hex_str_to_hash, hash_to_hex_str, double_sha256
+from bitcoinx import hash_to_hex_str, hex_str_to_hash
 import refcuckoo
-from electrumsv_node import electrumsv_node
 import requests
 import zmq
 
-from .constants import GENESIS_HASH, NULL_HASH, ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, \
-    ZMQ_TOPIC_HASH_TX
-from .parse_pushdata import get_pushdata_from_script
 from . import sqlite_db, utils
-from .types import CuckooResult, IndexerPushdataRegistrationFlag, output_spend_struct, \
-    OutputSpendRow, OutpointType, PushDataRow, TipFilterRegistrationEntry
+from .constants import (
+    GENESIS_HASH, NULL_HASH, ZMQ_NODE_PORT, ZMQ_TOPIC_HASH_BLOCK, ZMQ_TOPIC_HASH_TX
+)
+from .parse_pushdata import get_pushdata_from_script
+from .types import (
+    CuckooResult, IndexerPushdataRegistrationFlag, OutpointType, output_spend_struct,
+    OutputSpendRow, PushDataRow, TipFilterRegistrationEntry
+)
 from .utils import wait_for_initial_node_startup
 
 if TYPE_CHECKING:

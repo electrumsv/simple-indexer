@@ -21,26 +21,29 @@ are long running, in which case they should be handed off to a worker thread.
 """
 
 from __future__ import annotations
+
 import logging
 import os
 import sqlite3
 import sys
+
 if sys.platform == 'linux':
-    import pysqlite3 as pysqlite3
+    import pysqlite3  # pylint: disable=import-error
     sqlite3.Connection = pysqlite3.Connection
 
 import threading
 from typing import Any, cast, Generator, NamedTuple, Optional, Union
 
 from bitcoinx import hash_to_hex_str
-from electrumsv_database.sqlite import read_rows_by_id, read_rows_by_ids, \
-    replace_db_context_with_connection
+from electrumsv_database.sqlite import (
+    read_rows_by_id, read_rows_by_ids, replace_db_context_with_connection
+)
 
 from .constants import AccountFlag, MAX_UINT32, OutboundDataFlag
-from .types import AccountMetadata, IndexerPushdataRegistrationFlag, OutboundDataRow, \
-    OutpointType, OutputSpendRow, PushDataRow, RestorationFilterJSONResponse, \
-    RestorationFilterResult, TipFilterRegistrationEntry
-
+from .types import (
+    AccountMetadata, IndexerPushdataRegistrationFlag, OutboundDataRow, OutpointType, OutputSpendRow,
+    PushDataRow, RestorationFilterJSONResponse, RestorationFilterResult, TipFilterRegistrationEntry
+)
 
 logger = logging.getLogger("sqlite-database")
 mined_tx_hashes_table_lock = threading.RLock()

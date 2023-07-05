@@ -1,6 +1,6 @@
+from hashlib import sha256
 import logging
 import struct
-from hashlib import sha256
 from struct import Struct
 
 logger = logging.getLogger('utils')

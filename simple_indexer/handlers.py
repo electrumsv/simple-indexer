@@ -1,20 +1,23 @@
 from __future__ import annotations
-from aiohttp import web
-from bitcoinx import hex_str_to_hash, hash_to_hex_str
+
 from datetime import datetime, timedelta
 import json
 from json import JSONDecodeError
 import logging
-import requests
 from typing import Any, cast, Dict, Optional, TYPE_CHECKING
 
-from .constants import SERVER_HOST, SERVER_PORT
+from aiohttp import web
+from bitcoinx import hash_to_hex_str, hex_str_to_hash
+import requests
+
 from . import sqlite_db, utils
-from .types import FILTER_RESPONSE_SIZE, filter_response_struct, IndexerPushdataRegistrationFlag, \
-    outpoint_struct, OutpointJSONType, output_spend_struct, OutpointType, \
-    PushdataRegistrationJSONType, RestorationFilterRequest, tip_filter_entry_struct, \
-    TipFilterRegistrationEntry, TipFilterRegistrationResponse, tsc_merkle_proof_json_to_binary, \
-    ZEROED_OUTPOINT
+from .constants import SERVER_HOST, SERVER_PORT
+from .types import (
+    FILTER_RESPONSE_SIZE, filter_response_struct, IndexerPushdataRegistrationFlag, outpoint_struct,
+    OutpointJSONType, OutpointType, output_spend_struct, PushdataRegistrationJSONType,
+    RestorationFilterRequest, tip_filter_entry_struct, TipFilterRegistrationEntry,
+    TipFilterRegistrationResponse, tsc_merkle_proof_json_to_binary, ZEROED_OUTPOINT
+)
 
 if TYPE_CHECKING:
     from .server import ApplicationState

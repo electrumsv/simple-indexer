@@ -1,11 +1,10 @@
 import enum
 import struct
-from typing import Any, Optional, NamedTuple, TypedDict
+from typing import Any, NamedTuple, Optional, TypedDict
 
 import bitcoinx
 
 from .constants import AccountFlag, OutboundDataFlag
-
 
 OutpointType = tuple[bytes, int]
 OutpointJSONType = tuple[str, int]
